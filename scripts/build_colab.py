@@ -5,10 +5,18 @@ Rebuilds AIQuant_Colab.ipynb with the simplified Zero-Configuration pipeline.
 """
 
 import json
+import sys
 from pathlib import Path
 
 ROOT    = Path(__file__).parent.parent
 NB_PATH = ROOT / 'AIQuant_Colab.ipynb'
+
+# Pull run defaults from the single source of truth so the notebook's Step 3
+# config cell never drifts from run.py — see aiquant/defaults.py.
+sys.path.insert(0, str(ROOT))
+from aiquant.defaults import (
+    DEFAULT_PAIR, DEFAULT_DAYS, DEFAULT_CAPITAL, DEFAULT_FAST,
+)
 
 def md(source):
     return {"cell_type": "markdown", "metadata": {}, "source": source.split('\n')}
@@ -86,17 +94,19 @@ print('='*60)"""))
 
 # ── Step 3: Config ────────────────────────────────────────────────────────────
 cells.append(md("## Step 3 — Configuration"))
-cells.append(code("""import os, sys
+# Settings values below are interpolated from aiquant/defaults.py (single source of truth).
+step3_settings = f"""import os, sys
 sys.path.insert(0, '/content/AIQuant')
 os.chdir('/content/AIQuant')
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-PAIR                    = 'BTCUSDT'   # Trading pair
-DAYS                    = 1825        # Days of backtest data (1825 = 5 years)
-INITIAL_CAPITAL         = 100_000     # Starting capital (USD)
+PAIR                    = '{DEFAULT_PAIR}'   # Trading pair
+DAYS                    = {DEFAULT_DAYS}        # Days of backtest data (1825 = 5 years)
+INITIAL_CAPITAL         = {DEFAULT_CAPITAL}     # Starting capital (USD)
 HYPERLIQUID_PRIVATE_KEY = ''          # Required for Step 6 (Live Trading)
-FAST_MODE               = False       # True = skip LSTM (~3x faster)
-
+FAST_MODE               = {DEFAULT_FAST}       # True = skip LSTM (~3x faster)
+"""
+step3_env = """
 # ── Write .env ────────────────────────────────────────────────────────────────
 with open('.env', 'w') as f:
     f.write(f"HYPERLIQUID_PRIVATE_KEY={HYPERLIQUID_PRIVATE_KEY}\\n")
@@ -104,7 +114,8 @@ with open('.env', 'w') as f:
     f.write(f"TRADING_PAIR={PAIR}\\n")
     f.write(f"INITIAL_CAPITAL={INITIAL_CAPITAL}\\n")
 
-print(f'✓ Config set: {PAIR} | {DAYS} days | ${INITIAL_CAPITAL:,} capital')"""))
+print(f'✓ Config set: {PAIR} | {DAYS} days | ${INITIAL_CAPITAL:,} capital')"""
+cells.append(code(step3_settings + step3_env))
 
 # ── Step 4: Unified Backtest ──────────────────────────────────────────────────
 cells.append(md("""## Step 4 — Unified Backtest

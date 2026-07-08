@@ -1,9 +1,13 @@
+# Reference configuration for strategy/risk parameters.
+# NOTE: run-time defaults (pair, days, capital) are NOT read from here — they
+# live in aiquant/defaults.py, consumed by run.py and the Colab notebook.
 data:
   symbols:
     - BTC/USDT
   timeframes:
     - 1m
-  start_date: "2024-01-01"  # Focus on recent data for 1m HFT
+  # Backtest window is controlled by `run.py --days` (default 1825 = 5 years),
+  # not a fixed start date.
   data_dir: "data"
 
 features:
