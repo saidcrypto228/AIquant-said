@@ -99,8 +99,7 @@ AIQuant/
 │   │   ├── statarb.py              # 19 StatArb / regime features
 │   │   └── gpu_features.py         # CuPy GPU-accelerated feature engineering
 │   ├── models/
-│   │   ├── gpu_ml.py               # GPU ML: XGBoost + LightGBM + LSTM
-│   │   └── ml_signal.py            # ML signal generator
+│   │   └── ensemble_pipeline.py    # ML pipeline: XGBoost + LightGBM + LSTM, walk-forward CV
 │   ├── execution/
 │   │   ├── hyperliquid_trader.py   # Hyperliquid mainnet execution
 │   │   ├── ml_live_trader.py       # ML live trading (loads saved model bundle)
@@ -108,10 +107,11 @@ AIQuant/
 │   ├── risk/
 │   │   └── manager.py              # Kelly Criterion + drawdown limits
 │   └── utils/
+│       ├── console.py              # Shared ANSI colour helpers
 │       └── fast_math.py            # Numba JIT: Hurst, ADF, Kalman, OU
 ├── scripts/
 │   ├── prepare_data.py             # Build Binance Vision dataset
-│   ├── train_ml_ensemble.py        # Standalone ML training script
+│   ├── install_hooks.sh            # Install pre-commit hook (keeps notebook in sync)
 │   └── build_colab.py              # Regenerate AIQuant_Colab.ipynb
 ├── models/
 │   └── ml_live_bundle.pkl          # Saved ML model bundle (after backtest)
@@ -120,6 +120,28 @@ AIQuant/
 │   └── ml_best_params.json         # Saved ML best parameters
 └── data/raw/                       # OHLCV data (gitignored)
 ```
+
+---
+
+## Keeping Local & Colab in Sync
+
+There is **one** codebase, not two. The Colab notebook contains no strategy logic — it clones this
+repo and shells out to the same `run.py` CLI the local path uses. Points to remember:
+
+- **Colab runs GitHub, not your laptop.** Step 1 of the notebook does `git clone ...` of the `main`
+  branch. **Commit and push** before Colab picks up local changes.
+- **Run defaults live in one place:** [`aiquant/defaults.py`](aiquant/defaults.py) (`PAIR`, `DAYS`,
+  `CAPITAL`, ...). `run.py` and the notebook's Step 3 both read from it.
+- **The notebook is generated**, not hand-edited: `scripts/build_colab.py` produces
+  `AIQuant_Colab.ipynb`. Run the installer once so a pre-commit hook regenerates + stages it on every
+  commit (a stale notebook then can't be committed):
+
+  ```bash
+  sh scripts/install_hooks.sh   # sets git core.hooksPath = scripts/hooks
+  ```
+
+  Edit `scripts/build_colab.py` (or `aiquant/defaults.py`) to change the notebook — never edit the
+  `.ipynb` by hand.
 
 ---
 
