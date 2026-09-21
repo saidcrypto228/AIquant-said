@@ -446,81 +446,213 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         ens_score = 0.50 * oos_xgb + 0.50 * oos_lgb
         print(f"\n  {DIM('Ensemble: XGB 50% + LGB 50%  (LSTM skipped)')}")
 
-    # ── Threshold search + vectorised backtest ───────────────────────────────
-    print(f"\n  {CYAN('⚙')}  [5/5] Threshold search + vectorised backtest...")
+    # ── Validation / Final Test threshold selection ────────────────────────────
+    print(f"\n  {CYAN('⚙')}  [5/5] Validation threshold search + final test...")
 
-    best_r = None
+    # IMPORTANT:
+    # Thresholds are selected ONLY on validation OOS data.
+    # Final test is kept completely unseen until the final evaluation.
+    oos_idx = np.where(oos_mask)[0]
+
+    if len(oos_idx) < 100:
+        print(f"  {RED('✗')} Not enough OOS bars for validation/final-test split.")
+        return {}
+
+    split = int(len(oos_idx) * 0.70)
+    val_idx = oos_idx[:split]
+    test_idx = oos_idx[split:]
+
+    print(
+        f"  OOS split: {len(val_idx):,} validation bars / "
+        f"{len(test_idx):,} final-test bars"
+    )
+
+    # ── Threshold search ONLY on validation ───────────────────────────────────
+    best_thresholds = None
+    best_val_sharpe = -np.inf
+
     for long_thresh in [0.05, 0.08, 0.10, 0.12, 0.15, 0.18, 0.20, 0.25]:
         for short_thresh in [-0.05, -0.08, -0.10, -0.12, -0.15, -0.18, -0.20, -0.25]:
-            sig = np.zeros(n, np.int8)
-            sig[oos_mask & (ens_score >  long_thresh)]  =  1
-            sig[oos_mask & (ens_score <  short_thresh)] = -1
 
-            n_trades = int(np.sum(np.abs(np.diff(sig.astype(int)))) // 2)
-            if n_trades < 20: continue  # must have at least 20 trades
+            # Work exclusively on the contiguous validation OOS slice.
+            val_scores = ens_score[val_idx]
+            val_prices = c[val_idx]
 
-            changes = np.where(np.diff(sig, prepend=sig[0]) != 0)[0]
-            cap     = capital
-            equity  = np.full(n, capital, dtype=np.float64)
+            sig_val = np.zeros(len(val_idx), np.int8)
+            sig_val[val_scores > long_thresh] = 1
+            sig_val[val_scores < short_thresh] = -1
+
+            changes = np.where(
+                np.diff(sig_val, prepend=0) != 0
+            )[0]
+
+            n_trades = int(
+                np.sum(np.abs(np.diff(sig_val.astype(int)))) // 2
+            )
+            if n_trades < 20:
+                continue
+
+            cap = capital
+            equity = np.full(len(val_idx), capital, dtype=np.float64)
+
             wins = losses = 0
             gw = gl = 0.0
 
             for i in range(len(changes) - 1):
-                eb = changes[i]; xb = changes[i + 1]
-                d  = int(sig[eb])
+                eb = changes[i]
+                xb = changes[i + 1]
+                d = int(sig_val[eb])
+
                 if d == 0:
                     equity[eb:xb] = cap
                     continue
-                ep  = c[eb]; xp = c[xb]
-                sz  = (cap * 0.25) / ep
+
+                ep = val_prices[eb]
+                xp = val_prices[xb]
+                sz = (cap * 0.25) / ep
                 pnl = d * (xp - ep) * sz * (1 - FEE) ** 2
                 cap = max(cap + pnl, 1.0)
                 equity[eb:xb] = cap
-                if pnl > 0: wins  += 1; gw += pnl
-                else:       losses += 1; gl += abs(pnl)
+
+                if pnl > 0:
+                    wins += 1
+                    gw += pnl
+                else:
+                    losses += 1
+                    gl += abs(pnl)
+
             equity[changes[-1]:] = cap
 
-            total_ret = (cap - capital) / capital * 100
-            peak      = np.maximum.accumulate(equity)
-            dd        = (equity - peak) / peak * 100
-            max_dd    = float(np.min(dd))
-            n_days    = len(equity) // 1440
+            peak = np.maximum.accumulate(equity)
+            dd = (equity - peak) / peak * 100
+            max_dd = float(np.min(dd))
+
+            n_days = len(equity) // 1440
             if n_days > 2:
-                dl     = np.array([
-                    np.diff(np.log(equity[i*1440:(i+1)*1440] + 1e-10)).sum()
+                dl = np.array([
+                    np.diff(
+                        np.log(equity[i * 1440:(i + 1) * 1440] + 1e-10)
+                    ).sum()
                     for i in range(n_days)
                 ])
-                sharpe = float(dl.mean() / (dl.std() + 1e-10) * np.sqrt(365))
+                sharpe = float(
+                    dl.mean() / (dl.std() + 1e-10) * np.sqrt(365)
+                )
             else:
                 sharpe = 0.0
-            tt  = wins + losses
-            wr  = wins / tt * 100 if tt > 0 else 0.0
-            cal = total_ret / abs(max_dd) if abs(max_dd) > 0.01 else 0.0
-            pf  = gw / (gl + 1e-10)
 
-            r = dict(
-                sharpe=round(sharpe, 3), ret=round(total_ret, 2),
-                max_dd=round(max_dd, 2), calmar=round(cal, 3),
-                pf=round(pf, 3), trades=tt, win_rate=round(wr, 1),
-                final=round(cap, 2), equity=equity, signals=sig,
-                long_thresh=long_thresh, short_thresh=short_thresh,
-            )
+            if sharpe > best_val_sharpe:
+                best_val_sharpe = sharpe
+                best_thresholds = (long_thresh, short_thresh)
 
-            if best_r is None or r['sharpe'] > best_r['sharpe']:
-                best_r = r
-                col = GREEN if r['sharpe'] >= 2.0 else (YELLOW if r['sharpe'] >= 1.0 else RED)
-                sh_str = f"{r['sharpe']:+.3f}"
-                print(
-                    f"  {col('↑')} Sharpe={col(sh_str)}  "
-                    f"Ret={r['ret']:+.1f}%  MaxDD={r['max_dd']:.1f}%  "
-                    f"Trades={r['trades']:,}  WR={r['win_rate']:.0f}%  "
-                    f"Calmar={r['calmar']:.2f}  "
-                    f"[L>{long_thresh} S<{short_thresh}]"
-                )
-
-    if best_r is None:
-        print(f"  {RED('✗')} No valid threshold found. Try more data or looser filters.")
+    if best_thresholds is None:
+        print(f"  {RED('✗')} No valid validation threshold found.")
         return {}
+
+    best_long, best_short = best_thresholds
+
+    print(
+        f"  {GREEN('✓')} Validation best: "
+        f"Sharpe={best_val_sharpe:+.3f}  "
+        f"[L>{best_long} S<{best_short}]"
+    )
+
+    # ── FINAL TEST — thresholds are now frozen ───────────────────────────────
+    sig = np.zeros(n, np.int8)
+    sig[ens_score > best_long] = 1
+    sig[ens_score < best_short] = -1
+    sig[~np.isin(np.arange(n), test_idx)] = 0
+
+    changes = np.where(
+        np.diff(sig, prepend=sig[0]) != 0
+    )[0]
+
+    cap = capital
+    equity = np.full(n, capital, dtype=np.float64)
+    wins = losses = 0
+    gw = gl = 0.0
+
+    for i in range(len(changes) - 1):
+        eb = changes[i]
+        xb = changes[i + 1]
+        d = int(sig[eb])
+
+        if d == 0:
+            equity[eb:xb] = cap
+            continue
+
+        ep = c[eb]
+        xp = c[xb]
+        sz = (cap * 0.25) / ep
+        pnl = d * (xp - ep) * sz * (1 - FEE) ** 2
+        cap = max(cap + pnl, 1.0)
+        equity[eb:xb] = cap
+
+        if pnl > 0:
+            wins += 1
+            gw += pnl
+        else:
+            losses += 1
+            gl += abs(pnl)
+
+    equity[changes[-1]:] = cap
+
+    total_ret = (cap - capital) / capital * 100
+    peak = np.maximum.accumulate(equity)
+    dd = (equity - peak) / peak * 100
+    max_dd = float(np.min(dd))
+
+    test_bars = len(test_idx)
+    test_days = test_bars / 1440
+
+    if test_days > 2:
+        test_equity = equity[test_idx]
+        n_test_days = len(test_equity) // 1440
+        if n_test_days > 2:
+            dl = np.array([
+                np.diff(
+                    np.log(
+                        test_equity[i * 1440:(i + 1) * 1440] + 1e-10
+                    )
+                ).sum()
+                for i in range(n_test_days)
+            ])
+            sharpe = float(
+                dl.mean() / (dl.std() + 1e-10) * np.sqrt(365)
+            )
+        else:
+            sharpe = 0.0
+
+    trades = wins + losses
+    win_rate = wins / trades * 100 if trades > 0 else 0.0
+    calmar = total_ret / abs(max_dd) if abs(max_dd) > 0.01 else 0.0
+    pf = gw / (gl + 1e-10)
+
+    best_r = dict(
+        sharpe=round(sharpe, 3),
+        ret=round(total_ret, 2),
+        max_dd=round(max_dd, 2),
+        calmar=round(calmar, 3),
+        pf=round(pf, 3),
+        trades=trades,
+        win_rate=round(win_rate, 1),
+        final=round(cap, 2),
+        equity=equity,
+        signals=sig,
+        long_thresh=best_long,
+        short_thresh=best_short,
+    )
+
+    print(
+        f"  {GREEN('✓')} FINAL TEST (unseen): "
+        f"Ret={best_r['ret']:+.2f}%  "
+        f"Sharpe={best_r['sharpe']:+.3f}  "
+        f"MaxDD={best_r['max_dd']:.2f}%  "
+        f"PF={best_r['pf']:.3f}  "
+        f"Trades={best_r['trades']:,}  "
+        f"WR={best_r['win_rate']:.1f}%  "
+        f"[L>{best_long} S<{best_short}]"
+    )
 
     # ── Save best params ─────────────────────────────────────────────────────
     CONFIG_DIR.mkdir(exist_ok=True)
