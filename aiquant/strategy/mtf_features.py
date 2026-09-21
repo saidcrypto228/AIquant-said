@@ -121,3 +121,96 @@ def add_4h_features(
     )
 
     return result
+
+
+def add_1h_setup_features(
+    df_1h: pd.DataFrame,
+    df_4h_features: pd.DataFrame,
+    atr_period: int = 14,
+    swing_lookback: int = 3,
+) -> pd.DataFrame:
+    """
+    Build causal 1H setup features using completed 4H information.
+
+    4H features are aligned backward: for each 1H candle,
+    only the latest completed 4H candle at or before that timestamp
+    can be used.
+    """
+
+    result = df_1h.copy()
+
+    # Native 1H volatility and structure.
+    result["atr"] = atr(
+        result,
+        period=atr_period,
+    )
+
+    structure = swing_structure(
+        result,
+        lookback=swing_lookback,
+    )
+
+    result = result.join(structure)
+
+    result["last_swing_high"] = (
+        result["swing_high"].ffill()
+    )
+
+    result["last_swing_low"] = (
+        result["swing_low"].ffill()
+    )
+
+    result["structure_regime"] = np.select(
+        [
+            result["close"] > result["last_swing_high"],
+            result["close"] < result["last_swing_low"],
+        ],
+        [
+            1,
+            -1,
+        ],
+        default=0,
+    )
+
+    result["atr_pct"] = (
+        result["atr"] / result["close"]
+    )
+
+    # Align only completed 4H information.
+    htf = df_4h_features[
+        [
+            "atr",
+            "last_swing_high",
+            "last_swing_low",
+            "structure_regime",
+        ]
+    ].copy()
+
+    htf = htf.rename(
+        columns={
+            "atr": "htf_atr",
+            "last_swing_high": "htf_last_swing_high",
+            "last_swing_low": "htf_last_swing_low",
+            "structure_regime": "htf_structure_regime",
+        }
+    )
+
+    result = pd.merge_asof(
+        result.sort_index(),
+        htf.sort_index(),
+        left_index=True,
+        right_index=True,
+        direction="backward",
+    )
+
+    # Distance from current 1H price to the latest confirmed
+    # 4H structure levels, normalized by 1H ATR.
+    result["dist_to_htf_high_atr"] = (
+        result["htf_last_swing_high"] - result["close"]
+    ) / result["atr"]
+
+    result["dist_to_htf_low_atr"] = (
+        result["close"] - result["htf_last_swing_low"]
+    ) / result["atr"]
+
+    return result
