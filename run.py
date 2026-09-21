@@ -291,6 +291,7 @@ Examples:
     bt_p.add_argument('--capital', default=DEFAULT_CAPITAL, type=float, help=f'Starting capital USD (default: {DEFAULT_CAPITAL})')
     bt_p.add_argument('--force',   action='store_true', help='Force re-download even if cache exists')
     bt_p.add_argument('--fast',    action='store_true', help='Skip LSTM training (faster, ~3x speedup)')
+    bt_p.add_argument('--mtf',     action='store_true', help='Add causal 4H + 1H MTF features and force fresh feature selection')
 
     # ── live ──────────────────────────────────────────────────────────────
     lv_p = sub.add_parser('live', help='Start live trading on Hyperliquid mainnet')
@@ -331,6 +332,9 @@ Examples:
         print(f"  {CYAN('━'*54)}")
         df_feat = build_features(df)
         df_feat = df_feat.dropna()
+        if args.mtf:
+            df_feat = build_mtf_features(df_feat, include_15m=False)
+            print(f"  {GREEN('✓')} MTF mode: 4H + 1H features added")
         print(f"  {GREEN('✓')} {len(df_feat):,} bars × {df_feat.shape[1]} features after dropna")
 
         # Step 3: ML ensemble backtest
@@ -339,7 +343,8 @@ Examples:
         print(f"  {CYAN('━'*54)}")
         results = run_ml_backtest(
             df_feat, pair=pair, capital=args.capital,
-            fast=args.fast, days=args.days
+            fast=args.fast, days=args.days,
+            force_feature_selection=args.mtf
         )
 
         elapsed = time.time() - t0
