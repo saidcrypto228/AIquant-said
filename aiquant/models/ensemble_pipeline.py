@@ -225,17 +225,9 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     _xgb_tree_method = 'hist'
     _xgb_device      = 'cuda' if _ml_device == 'cuda' else 'cpu'
 
-    # LightGBM device — prefer 'cuda' (NVIDIA CUDA) over 'gpu' (OpenCL)
-    # 'gpu' uses OpenCL which is 2-3x slower than native CUDA on T4
-    # Fall back to 'gpu' if 'cuda' is not supported by installed LGB version
-    _lgb_device = 'cpu'
-    if _ml_device == 'cuda':
-        try:
-            import lightgbm as _lgb_test
-            _lgb_ver = tuple(int(x) for x in _lgb_test.__version__.split('.')[:2])
-            _lgb_device = 'cuda' if _lgb_ver >= (3, 3) else 'gpu'
-        except Exception:
-            _lgb_device = 'gpu'
+    # LightGBM GPU on Windows uses the OpenCL backend.
+    # XGBoost uses native CUDA separately above.
+    _lgb_device = 'gpu' if _ml_device == 'cuda' else 'cpu'
 
     # Suppress LightGBM OpenCL/CUDA compiler messages ("1 warning generated.")
     # These are emitted by the native C library to file descriptor 2 (stderr)
