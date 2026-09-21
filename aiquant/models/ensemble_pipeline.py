@@ -735,7 +735,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
                 SEQ_LEN_L   = 30
                 LSTM_FEATS_L = 20
                 lstm_feats_l = top_features[:LSTM_FEATS_L]
-                X_lstm_l     = df[lstm_feats_l].to_numpy(np.float64)
+                X_lstm_l     = X_sel[:, :LSTM_FEATS_L].astype(np.float64)
                 X_lstm_l     = np.nan_to_num(X_lstm_l, nan=0.0, posinf=0.0, neginf=0.0)
 
                 class _LSTMAttn(nn.Module):
@@ -781,7 +781,9 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
                     bundle['lstm_feat_mean'] = fm_l.cpu().numpy()
                     bundle['lstm_feat_std']  = fs_l.cpu().numpy()
             except Exception as _e:
+                import traceback
                 print(f"  {YELLOW('⚠')} LSTM save skipped: {_e}")
+                traceback.print_exc()
 
         joblib.dump(bundle, MODELS_DIR / 'ml_live_bundle.pkl')
         bundle_size = (MODELS_DIR / 'ml_live_bundle.pkl').stat().st_size / 1e6
