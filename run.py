@@ -170,7 +170,7 @@ def run_live_ml(pair: str = 'BTCUSDT', capital: float = 10_000, poll: float = 60
     if not pk or pk.startswith('your_'):
         print(f"\n  {RED('✗')}  HYPERLIQUID_PRIVATE_KEY not set in .env")
         print(f"  {DIM('  1. Open .env and add your Hyperliquid private key')}")
-        print(f"  {DIM('  2. Generate a wallet: python3 -c \"from eth_account import Account; a=Account.create(); print(a.key.hex())\"')}")
+        print("  " + DIM("  2. Generate a wallet: python3 -c \"from eth_account import Account; a=Account.create(); print(a.key.hex())\""))
         print(f"  {DIM('  3. Fund your account at https://app.hyperliquid.xyz')}")
         sys.exit(1)
 
@@ -202,7 +202,7 @@ def run_live(pair: str = 'BTCUSDT', capital: float = 10_000, poll: float = 60.0)
     if not pk or pk.startswith('your_'):
         print(f"\n  {RED('✗')}  HYPERLIQUID_PRIVATE_KEY not set in .env")
         print(f"  {DIM('  1. Open .env and add your Hyperliquid private key')}")
-        print(f"  {DIM('  2. Generate a wallet: python3 -c \"from eth_account import Account; a=Account.create(); print(a.key.hex())\"')}")
+        print("  " + DIM("  2. Generate a wallet: python3 -c \"from eth_account import Account; a=Account.create(); print(a.key.hex())\""))
         print(f"  {DIM('  3. Fund your account at https://app.hyperliquid.xyz')}")
         sys.exit(1)
 
