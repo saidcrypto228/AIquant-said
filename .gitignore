@@ -227,3 +227,6 @@ logs/
 results/*.png
 results/*.csv
 *.zip
+
+# ML model artifacts
+models/*.pkl
