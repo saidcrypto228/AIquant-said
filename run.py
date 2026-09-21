@@ -81,6 +81,7 @@ def banner(mode: str, pair: str, days: int = None):
     mode_str = {
         'backtest': '📊  BACKTEST  (ML Ensemble · Binance Vision + Hyperliquid)',
         'live':     '🔴  LIVE TRADING  (Hyperliquid Mainnet)',
+        'paper':    '🟡  ML PAPER TRADING  (Local Simulation)',
     }.get(mode, mode.upper())
     print(f"  Mode  : {BOLD(mode_str)}")
     print(f"  Pair  : {BOLD(CYAN(pair))}")
@@ -193,6 +194,40 @@ def run_live_ml(pair: str = 'BTCUSDT', capital: float = 10_000, poll: float = 60
     trader.start()
 
 
+
+def run_paper_ml(
+    pair: str = 'BTCUSDT',
+    capital: float = 10_000,
+    poll: float = 60.0,
+    max_bars: int = None,
+):
+    """Start local ML paper trading. No private key, no real orders."""
+    bundle_path = ROOT / 'models' / 'ml_live_bundle.pkl'
+
+    if not bundle_path.exists():
+        print(f"\n  {RED('✗')}  Model bundle not found at models/ml_live_bundle.pkl")
+        print(f"  {YELLOW('!')}  Run the validated backtest first.")
+        sys.exit(1)
+
+    print(f"  {GREEN('✓')} Model bundle found: {bundle_path.name}")
+    print(f"  {CYAN('▶')}  Starting ML PAPER trading")
+    print(f"  {DIM('  LOCAL SIMULATION ONLY — NO REAL ORDERS')}")
+    print()
+
+    from aiquant.execution.ml_paper_trader import MLPaperTrader
+
+    trader = MLPaperTrader(
+        pair=pair,
+        initial_capital=capital,
+        poll_interval_sec=poll,
+        feature_window=600,
+        bundle_path=str(bundle_path),
+        log_dir=str(LOGS_DIR / 'paper_trading'),
+    )
+    trader.start(max_bars=max_bars)
+
+
+
 def run_live(pair: str = 'BTCUSDT', capital: float = 10_000, poll: float = 60.0):
     """Start live trading on Hyperliquid mainnet (rule-based fallback)."""
     from dotenv import load_dotenv
@@ -265,6 +300,18 @@ Examples:
     lv_p.add_argument('--ml',      action='store_true',
                       help='Use trained ML ensemble (requires models/ml_live_bundle.pkl from backtest)')
 
+    # ── paper ─────────────────────────────────────────────────────────────
+    pp_p = sub.add_parser(
+        'paper',
+        help='Start local ML paper trading (NO real orders)',
+    )
+    pp_p.add_argument('--pair', default=DEFAULT_PAIR)
+    pp_p.add_argument('--capital', default=DEFAULT_CAPITAL, type=float)
+    pp_p.add_argument('--poll', default=DEFAULT_POLL, type=float)
+    pp_p.add_argument('--max-bars', default=None, type=int)
+    pp_p.add_argument('--ml', action='store_true',
+                      help='Use trained ML ensemble')
+
     args = parser.parse_args()
     pair = normalise_pair(args.pair)
 
@@ -310,6 +357,19 @@ Examples:
             run_live_ml(pair=pair, capital=args.capital, poll=args.poll)
         else:
             run_live(pair=pair, capital=args.capital, poll=args.poll)
+
+    elif args.mode == 'paper':
+        banner('paper', pair)
+
+        if not args.ml:
+            parser.error('paper mode currently requires --ml')
+
+        run_paper_ml(
+            pair=pair,
+            capital=args.capital,
+            poll=args.poll,
+            max_bars=args.max_bars,
+        )
 
 
 if __name__ == '__main__':
