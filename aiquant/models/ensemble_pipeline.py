@@ -32,7 +32,8 @@ MODELS_DIR  = ROOT / 'models'
 # ════════════════════════════════════════════════════════════════════════════
 
 def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
-                    fast: bool = False, days: int = None) -> dict:
+                    fast: bool = False, days: int = None,
+                    force_feature_selection: bool = False) -> dict:
     """
     Full ML ensemble backtest using walk-forward cross-validation.
 
@@ -103,7 +104,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     # Load saved top features if available — avoids building the full X_all matrix
     params_path = CONFIG_DIR / 'ml_best_params.json'
     saved_features = None
-    if params_path.exists():
+    if params_path.exists() and not force_feature_selection:
         try:
             with open(params_path) as f:
                 saved = json.load(f)
