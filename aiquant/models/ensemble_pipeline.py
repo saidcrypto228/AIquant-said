@@ -17,6 +17,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+from aiquant.strategy.trade_plan import TradePlanEngine, TradeDecision
 
 from aiquant.utils.console import BOLD, DIM, GREEN, RED, CYAN, YELLOW, WHITE
 
