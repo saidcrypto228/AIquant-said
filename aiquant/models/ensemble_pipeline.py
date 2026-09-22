@@ -671,7 +671,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     }
     params_file = CONFIG_DIR / ('ml_mtf_best_params.json' if force_feature_selection else 'ml_best_params.json')
     with open(params_file, 'w') as f:
-        json.dump(params, f, indent=2
+        json.dump(params, f, indent=2)
 
     # ── Save trained models to disk (for live trading) ───────────────────────
     try:
