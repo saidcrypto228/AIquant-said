@@ -1,96 +1,3 @@
-
-from numba import njit
-
-@njit
-def compute_triple_barrier_labels(
-    open_arr,
-    high_arr,
-    low_arr,
-    atr_arr,
-    timeout_bars=60,
-    stop_mult=1.8,
-    target_ratio=1.25,
-    min_stop_pct=0.0030
-):
-    n = len(open_arr)
-    labels = np.zeros(n, dtype=np.int8)
-
-    for i in range(n - timeout_bars - 1):
-        entry_idx = i + 1
-        entry = open_arr[entry_idx]
-        atr = atr_arr[i]
-
-        if not np.isfinite(atr) or atr <= 0.0:
-            continue
-
-        base_stop_dist = max(entry * min_stop_pct, atr * stop_mult)
-        tp_dist = base_stop_dist * target_ratio
-
-        sl_long = entry - base_stop_dist
-        tp_long = entry + tp_dist
-        long_win = False
-        long_loss = False
-
-        sl_short = entry + base_stop_dist
-        tp_short = entry - tp_dist
-        short_win = False
-        short_loss = False
-
-        end_idx = min(entry_idx + timeout_bars, n - 1)
-
-        # Scan path for Long
-        for j in range(entry_idx, end_idx + 1):
-            b_open = open_arr[j]
-            b_high = high_arr[j]
-            b_low = low_arr[j]
-
-            hit_sl = b_low <= sl_long
-            hit_tp = b_high >= tp_long
-
-            if hit_sl and hit_tp:
-                if abs(b_open - tp_long) < abs(b_open - sl_long):
-                    long_win = True
-                else:
-                    long_loss = True
-                break
-            elif hit_tp:
-                long_win = True
-                break
-            elif hit_sl:
-                long_loss = True
-                break
-
-        # Scan path for Short
-        for j in range(entry_idx, end_idx + 1):
-            b_open = open_arr[j]
-            b_high = high_arr[j]
-            b_low = low_arr[j]
-
-            hit_sl = b_high >= sl_short
-            hit_tp = b_low <= tp_short
-
-            if hit_sl and hit_tp:
-                if abs(b_open - tp_short) < abs(b_open - sl_short):
-                    short_win = True
-                else:
-                    short_loss = True
-                break
-            elif hit_tp:
-                short_win = True
-                break
-            elif hit_sl:
-                short_loss = True
-                break
-
-        if long_win and not short_win:
-            labels[i] = 1
-        elif short_win and not long_win:
-            labels[i] = -1
-        else:
-            labels[i] = 0
-
-    return labels
-
 """
 aiquant/models/ensemble_pipeline.py
 ===================================
@@ -115,7 +22,7 @@ from aiquant.utils.console import BOLD, DIM, GREEN, RED, CYAN, YELLOW, WHITE
 from aiquant.strategy.trade_plan import TradePlanEngine
 from aiquant.strategy.backtest_execution import simulate_trade_plan
 
-# -- Paths (repo root = two levels up from aiquant/models/) --------------------
+# в”Ђв”Ђ Paths (repo root = two levels up from aiquant/models/) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 ROOT        = Path(__file__).resolve().parents[2]
 CONFIG_DIR  = ROOT / 'config'
 RESULTS_DIR = ROOT / 'results'
@@ -157,49 +64,50 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     bullish_regime = c > sma_trend
     bearish_regime = c < sma_trend
 
-    # -- Memory banner --------------------------------------------------------
+    # в”Ђв”Ђ Memory banner в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     try:
         import psutil
         _mem = psutil.virtual_memory()
         _used_gb  = (_mem.total - _mem.available) / 1e9
         _total_gb = _mem.total / 1e9
-        print(f"  {DIM(f'RAM: {_used_gb:.1f} / {_total_gb:.1f} GB used  |  {n:,} bars  |  {len(df.columns)} columns')}")
+        print(f"  {DIM(f'RAM: {_used_gb:.1f} / {_total_gb:.1f} GB used  В·  {n:,} bars  В·  {len(df.columns)} columns')}")
     except Exception:
         pass
 
-    # -- Downcast feature DataFrame to float32 to halve memory ---------------
+    # в”Ђв”Ђ Downcast feature DataFrame to float32 to halve memory в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     float_cols = df.select_dtypes(include=[np.float64]).columns
     df[float_cols] = df[float_cols].astype(np.float32)
 
-    # -- Label generation ----------------------------------------------------
-    print("\n  [*] [1/5] Generating labels (volatility-scaled triple barrier)...")
-    TIMEOUT_BARS = 60
-    FORWARD_BARS = TIMEOUT_BARS
-    open_arr = df["open"].to_numpy(dtype=np.float64)
-    high_arr = df["high"].to_numpy(dtype=np.float64)
-    low_arr  = df["low"].to_numpy(dtype=np.float64)
-    atr_vals = df["atr_14"].to_numpy(dtype=np.float64) if "atr_14" in df.columns else np.zeros(n, dtype=np.float64)
+    # в”Ђв”Ђ Label generation в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    print(f"\n  {CYAN('вљ™')}  [1/5] Generating labels...")
+    FORWARD_BARS = 15
+    FEE          = 0.00035
+    # Dynamic threshold via atr_14
 
-    labels = compute_triple_barrier_labels(
-        open_arr=open_arr,
-        high_arr=high_arr,
-        low_arr=low_arr,
-        atr_arr=atr_vals,
-        timeout_bars=TIMEOUT_BARS,
-        stop_mult=1.8,
-        target_ratio=1.25,
-        min_stop_pct=0.0030
-    )
+    fwd_ret = np.zeros(n)
+    for i in range(n - FORWARD_BARS):
+        fwd_ret[i] = (c[i + FORWARD_BARS] - c[i]) / c[i]
+
+    labels = np.zeros(n, dtype=np.int8)
+    atr_vals = df["atr_14"].to_numpy(dtype=np.float64) if "atr_14" in df.columns else np.zeros(n)
+    LABEL_THRESHOLD = 0.0015
+
+dyn_thresh = np.maximum(
+    LABEL_THRESHOLD,
+    (atr_vals / np.maximum(c, 1e-6)) * 1.0
+)
+    labels[fwd_ret >  dyn_thresh] =  1
+    labels[fwd_ret < -dyn_thresh] = -1
 
     valid_mask = np.zeros(n, dtype=bool)
-    valid_mask[:n - TIMEOUT_BARS - 1] = True
+    valid_mask[:n - FORWARD_BARS] = True
 
     cc = {-1: int((labels == -1).sum()), 0: int((labels == 0).sum()), 1: int((labels == 1).sum())}
-    print(f"  [OK] Long={cc[1]:,}  Short={cc[-1]:,}  Flat={cc[0]:,}  "
+    print(f"  {GREEN('вњ“')} Long={cc[1]:,}  Short={cc[-1]:,}  Flat={cc[0]:,}  "
           f"({(cc[1]+cc[-1])/n*100:.1f}% directional)")
 
-    # ------------------ Feature selection ------------------
-    print(f"\n  {CYAN('[*]')}  [2/5] Feature selection (mutual information)...")
+    # в”Ђв”Ђ Feature selection в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    print(f"\n  {CYAN('вљ™')}  [2/5] Feature selection (mutual information)...")
 
     drop_cols    = ['open', 'high', 'low', 'close', 'volume']
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -215,7 +123,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
             sf = saved.get('top_features', [])
             if sf and all(feat in feature_cols for feat in sf):
                 saved_features = sf
-                print(f"  {GREEN('[OK]')} Using {len(saved_features)} saved features from ml_best_params.json")
+                print(f"  {GREEN('вњ“')} Using {len(saved_features)} saved features from ml_best_params.json")
         except Exception:
             pass
 
@@ -234,7 +142,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         mi_df     = pd.DataFrame({'feature': feature_cols, 'mi': mi_scores}).sort_values('mi', ascending=False)
         TOP_K     = 60
         saved_features = mi_df.head(TOP_K)['feature'].tolist()
-        print(f"  {GREEN('[OK]')} Top {TOP_K} features selected from {len(feature_cols)} total")
+        print(f"  {GREEN('вњ“')} Top {TOP_K} features selected from {len(feature_cols)} total")
         # Free X_all immediately вЂ” no longer needed
         del X_all, X_sample
         gc.collect()
@@ -263,8 +171,8 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
 
     print(f"  {DIM('Top 5: ' + ', '.join(top_features[:5]))}")
 
-    # -- Walk-forward CV setup ------------------------------------------------
-    print(f"\n  {CYAN('[*]')}  [3/5] Walk-forward cross-validation...")
+    # в”Ђв”Ђ Walk-forward CV setup в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    print(f"\n  {CYAN('вљ™')}  [3/5] Walk-forward cross-validation...")
 
     # Dynamic fold sizing вЂ” targets ~50 folds regardless of dataset length.
     # Training window : 1/6 of total days, clamped to [7d, 90d]
@@ -317,10 +225,10 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
             f"Minimum required: ~10 days. Use --days 45 or more."
         )
 
-    print(f"  {GREEN('[OK]')} {len(folds)} folds  "
-          f"(train={train_days}d | test/step={step_days}d | dataset={days_total:.0f}d)")
+    print(f"  {GREEN('вњ“')} {len(folds)} folds  "
+          f"(train={train_days}d В· test/step={step_days}d В· dataset={days_total:.0f}d)")
 
-    # -- GPU detection for ML ----------------------------------------------------
+    # в”Ђв”Ђ GPU detection for ML в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     try:
         import torch as _torch
         _ml_device = 'cuda' if _torch.cuda.is_available() else 'cpu'
@@ -360,9 +268,9 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         except Exception:
             pass
 
-    print(f"\n  {CYAN('[*]')}  [4/5] Training XGBoost + LightGBM (walk-forward)...")
-    print(f"  {DIM(f'  Device: {_gpu_name}  |  XGBoost tree_method=hist device={_xgb_device}  |  {len(folds)} folds')}")
-    print(f"  {DIM(f'  Each fold: ~43k train bars x 60 features  ->  10k test bars')}")
+    print(f"\n  {CYAN('вљ™')}  [4/5] Training XGBoost + LightGBM (walk-forward)...")
+    print(f"  {DIM(f'  Device: {_gpu_name}  В·  XGBoost tree_method=hist device={_xgb_device}  В·  {len(folds)} folds')}")
+    print(f"  {DIM(f'  Each fold: ~43k train bars Г— 60 features  в†’  10k test bars')}")
     print()
 
     oos_xgb  = np.zeros(n)
@@ -435,15 +343,15 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     _os.dup2(_stderr_save, _stderr_fd)
     _os.close(_stderr_save)
 
-    print(f"  {GREEN('[OK]')} OOS coverage: {oos_mask.sum():,} bars ({oos_mask.mean()*100:.1f}%)"
+    print(f"  {GREEN('вњ“')} OOS coverage: {oos_mask.sum():,} bars ({oos_mask.mean()*100:.1f}%)"
           f"  {DIM(f'  total {time.time()-_t_xgb_start:.0f}s')}")
 
-    # -- LSTM training --------------------------------------------------------
+    # в”Ђв”Ђ LSTM training в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     oos_lstm       = np.zeros(n)
     LSTM_AVAILABLE = False
 
     if not fast:
-        print(f"\n  {CYAN('[*]')}  [4b] Training LSTM (PyTorch)...")
+        print(f"\n  {CYAN('вљ™')}  [4b] Training LSTM (PyTorch)...")
         try:
             import torch
             import torch.nn as nn
@@ -474,7 +382,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
 
             _t_lstm_start  = time.time()
             _lstm_fold_times = []
-            print(f"  {DIM(f'  Device: {DEVICE}  |  SEQ_LEN={SEQ_LEN}  |  {LSTM_FEATS} features  |  5 epochs/fold  |  {len(folds)} folds')}")
+            print(f"  {DIM(f'  Device: {DEVICE}  В·  SEQ_LEN={SEQ_LEN}  В·  {LSTM_FEATS} features  В·  5 epochs/fold  В·  {len(folds)} folds')}")
             print()
 
             for fold_idx, (tr_start, tr_end, te_start, te_end) in enumerate(folds):
@@ -493,7 +401,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
                 X_tr_t    = (X_tr_t - feat_mean) / feat_std
 
                 ds      = TensorDataset(X_tr_t, y_tr_t)
-                # Larger batch size saturates T4 GPU better (512 -> 2048)
+                # Larger batch size saturates T4 GPU better (512 в†’ 2048)
                 _lstm_batch = 2048 if _ml_device == 'cuda' else 512
                 loader  = DataLoader(ds, batch_size=_lstm_batch, shuffle=True)
                 model   = LSTMAttn(LSTM_FEATS).to(DEVICE)
@@ -540,13 +448,13 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
                 )
 
             LSTM_AVAILABLE = True
-            print(f"  {GREEN('[OK]')} LSTM training complete  "
-                  f"(device: {DEVICE}  |  total {time.time()-_t_lstm_start:.0f}s)")
+            print(f"  {GREEN('вњ“')} LSTM training complete  "
+                  f"(device: {DEVICE}  В·  total {time.time()-_t_lstm_start:.0f}s)")
 
         except Exception as e:
             print(f"  {YELLOW('вљ ')} LSTM skipped: {e}")
 
-    # -- Ensemble score -------------------------------------------------------
+    # в”Ђв”Ђ Ensemble score в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     if LSTM_AVAILABLE:
         ens_score = 0.40 * oos_xgb + 0.40 * oos_lgb + 0.20 * oos_lstm
         print(f"\n  {DIM('Ensemble: XGB 40% + LGB 40% + LSTM 20%')}")
@@ -554,8 +462,8 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         ens_score = 0.50 * oos_xgb + 0.50 * oos_lgb
         print(f"\n  {DIM('Ensemble: XGB 50% + LGB 50%  (LSTM skipped)')}")
 
-    # -- Validation / Final Test threshold selection ----------------------------
-    print(f"\n  {CYAN('[*]')}  [5/5] Validation threshold search + final test...")
+    # в”Ђв”Ђ Validation / Final Test threshold selection в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    print(f"\n  {CYAN('вљ™')}  [5/5] Validation threshold search + final test...")
 
     # IMPORTANT:
     # Thresholds are selected ONLY on validation OOS data.
@@ -575,32 +483,75 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         f"{len(test_idx):,} final-test bars"
     )
 
-    # -- Dynamic Quantile Thresholds (No PnL Overfitting) -----------------
+    # -- Threshold search ONLY on validation -----------------------------
     val_scores = ens_score[val_idx]
+    best_thresholds = (0.025, -0.025)
+    best_val_sharpe = 0.0
+    best_val_pnl = -float("inf")
 
-    # Target top 15% conviction signals from validation distribution
-    conviction_pct = 85.0
-    pos_scores = val_scores[val_scores > 0]
-    neg_scores = val_scores[val_scores < 0]
+    l_grid = [0.03, 0.035, 0.04, 0.045, 0.05]
+    s_grid = [-0.05, -0.045, -0.04, -0.035, -0.03]
 
-    if len(pos_scores) > 50:
-        best_long = float(np.percentile(pos_scores, conviction_pct))
-    else:
-        best_long = 0.015
+    for long_thresh in l_grid:
+        for short_thresh in s_grid:
+            val_signal = np.zeros(len(val_idx), dtype=np.int8)
+            val_signal[val_scores > long_thresh] = 1
+            val_signal[val_scores < short_thresh] = -1
+            val_signal[bullish_regime[val_idx] & (val_signal == -1)] = 0
+            val_signal[bearish_regime[val_idx] & (val_signal == 1)] = 0
 
-    if len(neg_scores) > 50:
-        best_short = float(np.percentile(neg_scores, 100.0 - conviction_pct))
-    else:
-        best_short = -0.015
+            if np.count_nonzero(val_signal) < 2:
+                continue
 
-    # Safe bounds check
-    best_long = max(0.008, min(best_long, 0.040))
-    best_short = min(-0.008, max(best_short, -0.040))
+            val_open = df["open"].to_numpy(dtype=np.float64)[val_idx]
+            val_high = df["high"].to_numpy(dtype=np.float64)[val_idx]
+            val_low = df["low"].to_numpy(dtype=np.float64)[val_idx]
+            val_close = df["close"].to_numpy(dtype=np.float64)[val_idx]
+            val_atr = df["atr_14"].to_numpy(dtype=np.float64)[val_idx]
+            val_swing_high = df["dc_high"].to_numpy(dtype=np.float64)[val_idx]
+            val_swing_low = df["dc_low"].to_numpy(dtype=np.float64)[val_idx]
 
-    print(f"  [OK] Adaptive quantiles calculated: [L > {best_long:.4f} | S < {best_short:.4f}]")
+            execution_val = simulate_trade_plan(
+                signal=val_signal,
+                open_=val_open,
+                high=val_high,
+                low=val_low,
+                close=val_close,
+                atr=val_atr,
+                swing_high=val_swing_high,
+                swing_low=val_swing_low,
+                test_idx=np.arange(len(val_idx), dtype=int),
+                capital=capital,
+                risk_per_trade=0.005,
+                min_rr=1.2,
+                timeout_bars=60,
+                print_first_n=0,
+                save_csv=False,
+            )
+            equity = execution_val["equity_curve"]
+            if execution_val["total_trades"] < 2:
+                continue
 
-    # -- FINAL TEST - thresholds are now strictly frozen ------------------
-    sig = np.zeros(n, dtype=np.int8)
+            val_pnl = float(execution_val.get("net_pnl", equity[-1] - capital))
+            if val_pnl > best_val_pnl:
+                best_val_pnl = val_pnl
+                best_val_sharpe = float(execution_val.get("sharpe_ratio", 0.0))
+                best_thresholds = (long_thresh, short_thresh)
+
+    if best_thresholds is None:
+        best_thresholds = (0.025, -0.025)
+        best_val_sharpe = 0.0
+
+    best_long, best_short = best_thresholds
+
+    print(
+        f"  {GREEN('вњ“')} Validation best: "
+        f"Sharpe={best_val_sharpe:+.3f}  "
+        f"[L>{best_long} S<{best_short}]"
+    )
+
+    # в”Ђв”Ђ FINAL TEST вЂ” thresholds are now frozen в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    sig = np.zeros(n, np.int8)
     sig[ens_score > best_long] = 1
     sig[ens_score < best_short] = -1
     sig[~np.isin(np.arange(n), test_idx)] = 0
@@ -619,7 +570,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         test_idx=test_idx,
         capital=capital,
         risk_per_trade=0.005,
-        min_rr=0.5,
+        min_rr=1.2,
         timeout_bars=60,
         timestamps=df.index.to_numpy(),
         save_csv=True,
@@ -636,7 +587,6 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     gl = sum(abs(t["pnl"]) for t in execution["trades"] if t["pnl"] < 0)
     test_bars = len(test_idx)
     test_days = test_bars / 1440
-    sharpe = 0.0
 
     if test_days > 2:
         test_equity = equity[test_idx]
@@ -683,7 +633,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     )
 
     print(
-        f"  {GREEN('[OK]')} FINAL TEST (unseen): "
+        f"  {GREEN('вњ“')} FINAL TEST (unseen): "
         f"Ret={best_r['ret']:+.2f}%  "
         f"Sharpe={best_r['sharpe']:+.3f}  "
         f"MaxDD={best_r['max_dd']:.2f}%  "
@@ -693,7 +643,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         f"[L>{best_long} S<{best_short}]"
     )
 
-    # -- Save best params -----------------------------------------------------
+    # в”Ђв”Ђ Save best params в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     CONFIG_DIR.mkdir(exist_ok=True)
     params = {
         'model':         'XGBoost+LightGBM+LSTM Ensemble',
@@ -710,7 +660,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     with open(CONFIG_DIR / 'ml_best_params.json', 'w') as f:
         json.dump(params, f, indent=2)
 
-    # -- Save trained models to disk (for live trading) -----------------------
+    # в”Ђв”Ђ Save trained models to disk (for live trading) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     try:
         import joblib
         MODELS_DIR = ROOT / 'models'
@@ -824,18 +774,14 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
                 print(f"  {YELLOW('вљ ')} LSTM save skipped: {_e}")
                 traceback.print_exc()
 
-            if best_r.get("sharpe", -1.0) <= 0.0 or best_r.get("pf", 0.0) < 1.0:
-                print("  [!] SAFETY GATE: Sharpe <= 0 or PF < 1.0. Model rejected, bundle NOT saved.")
-            else:
-                joblib.dump(bundle, MODELS_DIR / 'ml_live_bundle.pkl')
-                bundle_size = (MODELS_DIR / 'ml_live_bundle.pkl').stat().st_size / 1e6
-                print(f"  [OK] Live model bundle saved -> models/ml_live_bundle.pkl  ({bundle_size:.1f} MB)")
-                print(f"  Contains: XGBoost + LightGBM + scaler + features + thresholds" + (" + LSTM" if bundle.get('lstm_state') is not None else ""))
-
+        joblib.dump(bundle, MODELS_DIR / 'ml_live_bundle.pkl')
+        bundle_size = (MODELS_DIR / 'ml_live_bundle.pkl').stat().st_size / 1e6
+        print(f"  {GREEN('вњ“')} Live model bundle saved в†’ models/ml_live_bundle.pkl  ({bundle_size:.1f} MB)")
+        print(f"  {DIM('  Contains: XGBoost + LightGBM + scaler + features + thresholds' + (' + LSTM' if bundle['lstm_state'] is not None else ''))}")
     except Exception as _e:
         print(f"  {YELLOW('вљ ')} Model save failed: {_e}")
 
-    # -- Print results table --------------------------------------------------
+    # в”Ђв”Ђ Print results table в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     col = GREEN if best_r['ret'] >= 0 else RED
     ret_str    = f"{best_r['ret']:>+.2f}%"
     sharpe_str = f"{best_r['sharpe']:>22.4f}"
@@ -846,9 +792,9 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     lt_str     = f"{best_r['long_thresh']:>22}"
     st_str     = f"{best_r['short_thresh']:>22}"
     print()
-    print(f"  {'-'*56}")
-    print(f"  ML ENSEMBLE BACKTEST RESULTS  |  {BOLD(pair)}")
-    print(f"  {'-'*56}")
+    print(f"  {'в”Ђ'*56}")
+    print(f"  ML ENSEMBLE BACKTEST RESULTS  В·  {BOLD(pair)}")
+    print(f"  {'в”Ђ'*56}")
     print(f"  Initial Capital   {WHITE('$'):>4}{capital:>19,.2f}")
     print(f"  Final Value       {col('$'):>4}{best_r['final']:>19,.2f}")
     print(f"  Total Return      {col(ret_str):>23}")
@@ -862,9 +808,9 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     print(f"  Short Threshold   {st_str}")
     print(f"  Data Source       {'Binance Vision + Hyperliquid':>22}")
     print(f"  Model             {'XGB 40% + LGB 40% + LSTM 20%':>22}")
-    print(f"  {'-'*56}")
+    print(f"  {'в”Ђ'*56}")
 
-    # -- Save chart -----------------------------------------------------------
+    # в”Ђв”Ђ Save chart в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     _save_ml_chart(df, best_r, pair, capital, ens_score, oos_mask, days)
 
     return best_r
@@ -892,7 +838,7 @@ def _save_ml_chart(df, best_r, pair, capital, ens_score, oos_mask, days=None):
 
         fig = plt.figure(figsize=(18, 12), facecolor='#0d1117')
         fig.suptitle(
-            f"AIQuant  |  ML Ensemble (XGB+LGB+LSTM)  |  {pair}  |  {days}-Day Backtest\n"
+            f"AIQuant  В·  ML Ensemble (XGB+LGB+LSTM)  В·  {pair}  В·  {days}-Day Backtest\n"
             f"Sharpe {best_r['sharpe']:+.3f}  |  Return {best_r['ret']:+.1f}%  |  "
             f"MaxDD {best_r['max_dd']:.1f}%  |  Calmar {best_r['calmar']:.3f}  |  "
             f"{best_r['trades']:,} trades  |  {best_r['win_rate']:.1f}% win rate  |  "
@@ -963,7 +909,7 @@ def _save_ml_chart(df, best_r, pair, capital, ens_score, oos_mask, days=None):
         out = RESULTS_DIR / 'backtest_results.png'
         plt.savefig(out, dpi=150, bbox_inches='tight', facecolor='#0d1117')
         plt.close(fig)
-        print(f"\n  {GREEN('[OK]')} Chart saved -> {out}")
+        print(f"\n  {GREEN('вњ“')} Chart saved в†’ {out}")
 
         # Try to open on desktop environments
         if platform.system() == 'Darwin':
