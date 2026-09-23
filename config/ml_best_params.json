@@ -1,9 +1,9 @@
 {
   "model": "XGBoost+LightGBM+LSTM Ensemble",
-  "forward_bars": 60,
+  "forward_bars": 180,
   "threshold_pct": "dynamic_atr",
-  "long_thresh": 0.04,
-  "short_thresh": -0.04,
+  "long_thresh": 0.64,
+  "short_thresh": 0.64,
   "top_features": [
     "cusum_pos",
     "cusum_neg",
@@ -90,15 +90,15 @@
   ],
   "lstm_seq_len": 30,
   "results": {
-    "sharpe": -27.394,
-    "ret": -33.55,
-    "max_dd": -33.96,
-    "calmar": -0.988,
-    "pf": 0.422,
-    "trades": 364,
-    "win_rate": 35.4,
-    "final": 66450.79,
-    "long_thresh": 0.04,
-    "short_thresh": -0.04
+    "sharpe": -30.422,
+    "ret": -21.06,
+    "max_dd": -21.06,
+    "calmar": -1.0,
+    "pf": 0.274,
+    "trades": 158,
+    "win_rate": 47.5,
+    "final": 78938.51,
+    "long_thresh": 0.64,
+    "short_thresh": 0.64
   }
 }

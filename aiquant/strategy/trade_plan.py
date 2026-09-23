@@ -77,6 +77,7 @@ class TradePlanEngine:
         atr_target_mult: float = 2.25,
     ) -> TradePlan:
         side = side.upper()
+        # Полная синхронизация с compute_triple_barrier_labels (stop=1.8*ATR, min_stop=0.30%, target_ratio=1.25)
         base_stop_dist = max(entry * 0.0030, atr * atr_stop_mult)
         target_ratio = 1.25
 

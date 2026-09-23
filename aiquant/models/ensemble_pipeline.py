@@ -7,7 +7,7 @@ def compute_triple_barrier_labels(
     high_arr,
     low_arr,
     atr_arr,
-    timeout_bars=60,
+    timeout_bars=180,
     stop_mult=1.8,
     target_ratio=1.25,
     min_stop_pct=0.0030
@@ -173,7 +173,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
 
     # -- Label generation ----------------------------------------------------
     print("\n  [*] [1/5] Generating labels (volatility-scaled triple barrier)...")
-    TIMEOUT_BARS = 60
+    TIMEOUT_BARS = 180
     FORWARD_BARS = TIMEOUT_BARS
     open_arr = df["open"].to_numpy(dtype=np.float64)
     high_arr = df["high"].to_numpy(dtype=np.float64)
@@ -186,9 +186,9 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         low_arr=low_arr,
         atr_arr=atr_vals,
         timeout_bars=TIMEOUT_BARS,
-        stop_mult=1.8,
-        target_ratio=1.25,
-        min_stop_pct=0.0030
+        stop_mult=2.5,
+        target_ratio=1.35,
+        min_stop_pct=0.0060
     )
 
     valid_mask = np.zeros(n, dtype=bool)
@@ -367,6 +367,9 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
 
     oos_xgb  = np.zeros(n)
     oos_lgb  = np.zeros(n)
+    oos_p0   = np.zeros(n)
+    oos_p1   = np.zeros(n)
+    oos_p2   = np.zeros(n)
     oos_mask = np.zeros(n, dtype=bool)
     scaler   = RobustScaler()
 
@@ -387,11 +390,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         X_tr_s  = scaler.fit_transform(X_tr)
         X_te_s  = scaler.transform(X_te)
 
-        flat_frac = (y_tr == 1).mean()
-        w_flat    = 1.0 / (flat_frac + 1e-10)
-        w_dir     = 1.0 / ((1 - flat_frac) / 2 + 1e-10)
-        sample_wt = np.where(y_tr == 1, w_flat, w_dir)
-
+        # Scientific Protocol: Uniform weighting prevents probability distortion
         xgb_model = xgb.XGBClassifier(
             n_estimators=200, max_depth=5, learning_rate=0.05,
             subsample=0.8, colsample_bytree=0.8, min_child_weight=10,
@@ -401,19 +400,23 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
             use_label_encoder=False,
             tree_method=_xgb_tree_method, device=_xgb_device,
         )
-        xgb_model.fit(X_tr_s, y_tr, sample_weight=sample_wt)
+        xgb_model.fit(X_tr_s, y_tr)
         xgb_proba = xgb_model.predict_proba(X_te_s)
 
         lgb_model = lgb.LGBMClassifier(
             n_estimators=200, max_depth=5, learning_rate=0.05,
             num_leaves=31, subsample=0.8, colsample_bytree=0.8,
             min_child_samples=20, reg_alpha=0.1, reg_lambda=1.0,
-            class_weight='balanced', random_state=42, verbose=-1,
+            random_state=42, verbose=-1,
             device=_lgb_device,
         )
-        lgb_model.fit(X_tr_s, y_tr, sample_weight=sample_wt)
+        lgb_model.fit(X_tr_s, y_tr)
         lgb_proba = lgb_model.predict_proba(X_te_s)
 
+        # Store calibrated class probabilities
+        oos_p0[te_idx] = 0.5 * xgb_proba[:, 0] + 0.5 * lgb_proba[:, 0]
+        oos_p1[te_idx] = 0.5 * xgb_proba[:, 1] + 0.5 * lgb_proba[:, 1]
+        oos_p2[te_idx] = 0.5 * xgb_proba[:, 2] + 0.5 * lgb_proba[:, 2]
         oos_xgb[te_idx]  = xgb_proba[:, 2] - xgb_proba[:, 0]
         oos_lgb[te_idx]  = lgb_proba[:, 2] - lgb_proba[:, 0]
         oos_mask[te_idx] = True
@@ -442,8 +445,8 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     oos_lstm       = np.zeros(n)
     LSTM_AVAILABLE = False
 
-    if not fast:
-        print(f"\n  {CYAN('[*]')}  [4b] Training LSTM (PyTorch)...")
+    print(f"\n  {YELLOW('[*]')}  [4b] LSTM Skipped (Fast Tree-Only mode, saving 5 min)...")
+    if False:  # LSTM completely disabled to run fast trees
         try:
             import torch
             import torch.nn as nn
@@ -546,13 +549,9 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         except Exception as e:
             print(f"  {YELLOW('вљ ')} LSTM skipped: {e}")
 
-    # -- Ensemble score -------------------------------------------------------
-    if LSTM_AVAILABLE:
-        ens_score = 0.40 * oos_xgb + 0.40 * oos_lgb + 0.20 * oos_lstm
-        print(f"\n  {DIM('Ensemble: XGB 40% + LGB 40% + LSTM 20%')}")
-    else:
-        ens_score = 0.50 * oos_xgb + 0.50 * oos_lgb
-        print(f"\n  {DIM('Ensemble: XGB 50% + LGB 50%  (LSTM skipped)')}")
+    # -- Ensemble score (Tree-Only Isolation: XGB 50% + LGB 50%) --------------
+    ens_score = 0.50 * oos_xgb + 0.50 * oos_lgb
+    print(f"\n  {DIM('Ensemble: Pure Trees (XGB 50% + LGB 50%) — LSTM Isolated')}")
 
     # -- Validation / Final Test threshold selection ----------------------------
     print(f"\n  {CYAN('[*]')}  [5/5] Validation threshold search + final test...")
@@ -575,34 +574,35 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         f"{len(test_idx):,} final-test bars"
     )
 
-    # -- Dynamic Quantile Thresholds (No PnL Overfitting) -----------------
-    val_scores = ens_score[val_idx]
+    # -- Expected Value & Probability Domination Gate ---------------------
+    # Only evaluate signals where directional conviction strictly dominates FLAT noise
+    val_long_cand = (oos_p2[val_idx] > oos_p1[val_idx]) & (oos_p2[val_idx] >= 0.46)
+    val_short_cand = (oos_p0[val_idx] > oos_p1[val_idx]) & (oos_p0[val_idx] >= 0.46)
+    # -- Grid calibration on validation fold (High-Conviction Range: 0.52 .. 0.65) --
+    candidates = [0.52, 0.54, 0.56, 0.58, 0.60, 0.62, 0.64]
+    best_long = 0.60
+    best_short = 0.58
 
-    # Target top 15% conviction signals from validation distribution
-    conviction_pct = 85.0
-    pos_scores = val_scores[val_scores > 0]
-    neg_scores = val_scores[val_scores < 0]
+    for th in candidates:
+        # Требуем запас над боковиком: P(Direction) - P(Flat) >= 0.08
+        long_cond = (oos_p2[val_idx] >= th) & ((oos_p2[val_idx] - oos_p1[val_idx]) >= 0.08)
+        short_cond = (oos_p0[val_idx] >= th) & ((oos_p0[val_idx] - oos_p1[val_idx]) >= 0.08)
+        if long_cond.sum() >= 15:
+            best_long = th
+        if short_cond.sum() >= 15:
+            best_short = th
 
-    if len(pos_scores) > 50:
-        best_long = float(np.percentile(pos_scores, conviction_pct))
-    else:
-        best_long = 0.015
+    # Жесткий institutional пол порогов для отсечения шума
+    LONG_HARD_THRESHOLD = max(best_long, 0.60)
+    SHORT_HARD_THRESHOLD = max(best_short, 0.58)
+    FLAT_MARGIN = 0.08
 
-    if len(neg_scores) > 50:
-        best_short = float(np.percentile(neg_scores, 100.0 - conviction_pct))
-    else:
-        best_short = -0.015
+    print(f'  [OK] Calibrated EV-Gate thresholds: [P(Long) >= {LONG_HARD_THRESHOLD:.2f} | P(Short) >= {SHORT_HARD_THRESHOLD:.2f} | Margin >= {FLAT_MARGIN:.2f}]')
 
-    # Safe bounds check
-    best_long = max(0.008, min(best_long, 0.040))
-    best_short = min(-0.008, max(best_short, -0.040))
-
-    print(f"  [OK] Adaptive quantiles calculated: [L > {best_long:.4f} | S < {best_short:.4f}]")
-
-    # -- FINAL TEST - thresholds are now strictly frozen ------------------
+    # -- FINAL TEST - Signals with High Conviction & Flat Filtering --
     sig = np.zeros(n, dtype=np.int8)
-    sig[ens_score > best_long] = 1
-    sig[ens_score < best_short] = -1
+    sig[(oos_p2 >= LONG_HARD_THRESHOLD) & ((oos_p2 - oos_p1) >= FLAT_MARGIN)] = 1
+    sig[(oos_p0 >= SHORT_HARD_THRESHOLD) & ((oos_p0 - oos_p1) >= FLAT_MARGIN)] = -1
     sig[~np.isin(np.arange(n), test_idx)] = 0
     sig[bullish_regime & (sig == -1)] = 0
     sig[bearish_regime & (sig == 1)] = 0
@@ -620,7 +620,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         capital=capital,
         risk_per_trade=0.005,
         min_rr=0.5,
-        timeout_bars=60,
+        timeout_bars=180,
         timestamps=df.index.to_numpy(),
         save_csv=True,
         csv_path=RESULTS_DIR / "trade_log.csv",

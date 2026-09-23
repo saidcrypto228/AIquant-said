@@ -63,28 +63,56 @@ def simulate_trade_plan(
             continue
 
         exit_idx = min(entry_idx + timeout_bars, len(close) - 1)
-        exit_price, exit_reason = float(close[exit_idx]), "TIMEOUT"
-        active_sl = plan.stop_loss
+        exit_price, exit_reason = float(close[exit_idx]), 'TIMEOUT'
+        active_sl = float(plan.stop_loss)
         risk_dist = abs(plan.entry - plan.stop_loss)
+        init_tp_dist = abs(plan.take_profit - plan.entry)
+        # Минимальный TP жестко привязан к 1.0R (не опускается в микропрофиты)
+        min_tp_dist = risk_dist * 1.00
 
         for j in range(entry_idx, exit_idx + 1):
-            b_open, b_high, b_low = float(open_[j]), float(high[j]), float(low[j])
-            # Strictly hold until original SL or TP (matching Triple Barrier definition)
-            if side == "LONG":
-                hit_sl = b_low <= plan.stop_loss
-                hit_tp = b_high >= plan.take_profit
+            b_open, b_high, b_low, b_close = float(open_[j]), float(high[j]), float(low[j]), float(close[j])
+            bars_held = j - entry_idx
+
+            # 1. Безубыток при достижении +0.75R
+            if side == 'LONG':
+                if (b_high - plan.entry) >= (0.75 * risk_dist):
+                    be_level = plan.entry * 1.0010
+                    active_sl = max(active_sl, be_level)
             else:
-                hit_sl = b_high >= plan.stop_loss
-                hit_tp = b_low <= plan.take_profit
+                if (plan.entry - b_low) >= (0.75 * risk_dist):
+                    be_level = plan.entry * 0.9990
+                    active_sl = min(active_sl, be_level)
+
+            # 2. Умеренное сжатие цели: с 1.35R до минимум 1.00R
+            elapsed_ratio = min(1.0, bars_held / max(timeout_bars, 1))
+            decay_factor = 1.0 - (elapsed_ratio ** 1.5) * 0.35
+            curr_tp_dist = max(init_tp_dist * decay_factor, min_tp_dist)
+            curr_tp = plan.entry + curr_tp_dist if side == 'LONG' else plan.entry - curr_tp_dist
+
+            # 3. Досрочный выход при затухании импульса (> 45 баров без развития)
+            # [DISABLED] if bars_held >= 45:
+            # [DISABLED] unrealized_pnl_pct = (b_close - plan.entry) / plan.entry if side == 'LONG' else (plan.entry - b_close) / plan.entry
+            # [DISABLED] if abs(unrealized_pnl_pct) < (0.30 * (risk_dist / plan.entry)):
+            # [DISABLED] exit_idx, exit_price, exit_reason = j, b_close, 'STAGNATION'
+            # [DISABLED] break
+
+            # 4. Проверка исполнения барьеров
+            if side == 'LONG':
+                hit_sl = b_low <= active_sl
+                hit_tp = b_high >= curr_tp
+            else:
+                hit_sl = b_high >= active_sl
+                hit_tp = b_low <= curr_tp
 
             if hit_sl and hit_tp:
-                exit_idx, exit_price, exit_reason = (j, plan.take_profit, "TP") if abs(b_open - plan.take_profit) < abs(b_open - active_sl) else (j, active_sl, "SL")
+                exit_idx, exit_price, exit_reason = (j, curr_tp, 'TP') if abs(b_open - curr_tp) < abs(b_open - active_sl) else (j, active_sl, 'SL')
                 break
             elif hit_sl:
-                exit_idx, exit_price, exit_reason = j, active_sl, "SL"
+                exit_idx, exit_price, exit_reason = j, active_sl, 'SL'
                 break
             elif hit_tp:
-                exit_idx, exit_price, exit_reason = j, plan.take_profit, "TP"
+                exit_idx, exit_price, exit_reason = j, curr_tp, 'TP'
                 break
 
         gross_pnl = (exit_price - plan.entry) * plan.position_size if side == "LONG" else (plan.entry - exit_price) * plan.position_size
@@ -126,6 +154,16 @@ def simulate_trade_plan(
     total_trades = len(trades)
     win_rate = (wins / total_trades) if total_trades else 0.0
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0.0
+
+    if save_csv and trades:
+        try:
+            import pandas as pd
+            df_log = pd.DataFrame(trades)
+            out_p = Path(csv_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            df_log.to_csv(out_p, index=False)
+        except Exception as e:
+            print(f"[!] Ошибка сохранения trade_log.csv: {e}")
 
     return {
         "final_equity": equity,
