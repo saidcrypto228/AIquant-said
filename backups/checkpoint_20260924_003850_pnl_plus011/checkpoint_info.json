@@ -1,0 +1,13 @@
+{
+  "timestamp": "20260924_003850",
+  "description": "Baseline: Causal MTF + 15m + Triple Barrier (24 bars / 1.15R / SL 0.90%)",
+  "metrics": {
+    "return_pct": 0.11,
+    "profit_factor": 1.032,
+    "max_dd_pct": -1.91,
+    "win_rate_pct": 45.8,
+    "total_trades": 24,
+    "long_pnl": 1174.6,
+    "short_pnl": -1063.83
+  }
+}

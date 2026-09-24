@@ -6,8 +6,10 @@
     "risk_limits": {
         "max_drawdown_pct": 0.08,
         "daily_loss_limit_usd": 200.0,
-        "risk_per_trade_pct": 0.006,
-        "monoposition": true
+        "risk_per_trade_pct": 0.004,
+        "monoposition": true,
+        "ruin_probability_monte_carlo": 0.0343,
+        "var_95_max_dd_pct": -7.48
     },
     "trade_structure": {
         "sl_atr_mult": 1.3,

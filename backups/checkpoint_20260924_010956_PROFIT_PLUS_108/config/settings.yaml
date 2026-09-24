@@ -1,0 +1,37 @@
+# Reference configuration for strategy/risk parameters.
+# NOTE: run-time defaults (pair, days, capital) are NOT read from here — they
+# live in aiquant/defaults.py, consumed by run.py and the Colab notebook.
+data:
+  symbols:
+    - BTC/USDT
+  timeframes:
+    - 1m
+  # Backtest window is controlled by `run.py --days` (default 1825 = 5 years),
+  # not a fixed start date.
+  data_dir: "data"
+
+features:
+  statarb:
+    lookback_periods: [60, 120, 240]  # 1h, 2h, 4h in 1m bars
+    zscore_threshold: 2.5
+    half_life_max: 30
+  microstructure:
+    ofi_periods: [5, 15, 30]  # Order Flow Imbalance periods
+    vpin_periods: [5, 15, 30] # Volume-Synchronized Probability of Informed Trading
+  
+backtest:
+  initial_capital: 100000
+  fees: 0.00035  # Hyperliquid taker fee
+  slippage: 0.0001
+  freq: "1m"
+
+risk:
+  kelly_fraction: 0.5  # Half-Kelly for safer sizing
+  max_position_size: 0.25
+  stop_loss_pct: 0.01  # Tight stops for 1m HFT
+  take_profit_pct: 0.03
+  max_drawdown_limit: 0.15
+
+execution:
+  exchange: "hyperliquid"
+  network: "testnet"  # Default to paper trading

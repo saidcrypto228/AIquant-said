@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIQuant — Backtest Results</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      padding: 24px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 28px;
+      border-bottom: 1px solid #21262d;
+      padding-bottom: 20px;
+    }
+    header h1 { font-size: 1.5rem; font-weight: 700; color: #00b4d8; }
+    header p  { font-size: 0.85rem; color: #8b949e; margin-top: 4px; }
+    .badge {
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 3px 10px;
+      font-size: 0.75rem;
+      color: #58a6ff;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 14px;
+      margin-bottom: 28px;
+    }
+    .card {
+      background: #161b22;
+      border: 1px solid #21262d;
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .card .label { font-size: 0.72rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.06em; }
+    .card .value { font-size: 1.4rem; font-weight: 700; margin-top: 6px; }
+    .card .value.neg { color: #f85149; }
+    .card .value.pos { color: #3fb950; }
+    .card .value.neu { color: #e6edf3; }
+    .chart-box {
+      background: #161b22;
+      border: 1px solid #21262d;
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .chart-box h2 { font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: #c9d1d9; }
+    .chart-box img { width: 100%; border-radius: 6px; display: block; }
+    .note {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-left: 4px solid #00b4d8;
+      border-radius: 6px;
+      padding: 14px 18px;
+      font-size: 0.85rem;
+      color: #8b949e;
+      line-height: 1.6;
+    }
+    .note strong { color: #e6edf3; }
+    footer { margin-top: 32px; text-align: center; font-size: 0.75rem; color: #484f58; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>AIQuant — Backtest Results</h1>
+      <p>BTCUSD 1m | 2026-06-10 → 2026-06-17 | AegisFintech</p>
+    </div>
+    <span class="badge">BTCUSDT</span>
+    <span class="badge">1m</span>
+    <span class="badge">Backtrader</span>
+  </header>
+
+  <div class="metrics">
+    <div class="card">
+      <div class="label">Total Return</div>
+      <div class="value neg">-3.05%</div>
+    </div>
+    <div class="card">
+      <div class="label">Initial Capital</div>
+      <div class="value neu">$100,000</div>
+    </div>
+    <div class="card">
+      <div class="label">Final Value</div>
+      <div class="value neg">$96,950</div>
+    </div>
+    <div class="card">
+      <div class="label">Sharpe Ratio</div>
+      <div class="value neu">0.00</div>
+    </div>
+    <div class="card">
+      <div class="label">Max Drawdown</div>
+      <div class="value neg">3.17%</div>
+    </div>
+    <div class="card">
+      <div class="label">Total Trades</div>
+      <div class="value neu">105</div>
+    </div>
+    <div class="card">
+      <div class="label">Win Rate</div>
+      <div class="value neg">21.0%</div>
+    </div>
+    <div class="card">
+      <div class="label">Avg Win</div>
+      <div class="value pos">+$54.54</div>
+    </div>
+    <div class="card">
+      <div class="label">Avg Loss</div>
+      <div class="value neg">-$51.18</div>
+    </div>
+  </div>
+
+  <div class="chart-box">
+    <h2>Equity Curve / Drawdown / Signal Distribution</h2>
+    <img src="backtest_results.png" alt="Backtest Results Chart" />
+  </div>
+
+  <div class="note">
+    <strong>Interpretation:</strong> The -3.05% return on this 7-day window is expected for an uncalibrated signal.
+    The Kalman z-score thresholds (±1.8) are generating too many low-confidence trades (21% win rate).
+    Next step: widen thresholds to ±2.5, extend backtest to 30–90 days, and run ML ensemble training.
+    Max drawdown of 3.17% confirms risk controls are functioning correctly.
+  </div>
+
+  <footer>AIQuant v0.2.0 | AegisFintech | Generated {{ date }}</footer>
+
+  <script>
+    document.querySelector('footer').textContent =
+      document.querySelector('footer').textContent.replace('{{ date }}', new Date().toLocaleString());
+  </script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "VWAP Reversion": {
+    "params": "vwap[-2.0,2.0] rsi[28,72] adx<25 hold=20",
+    "sharpe": 0.556,
+    "return": 0.39,
+    "calmar": 0.364
+  },
+  "RSI+BB Touch": {
+    "params": "os=30 ob=75 touch=0.02 hold=10",
+    "sharpe": 0.231,
+    "return": 0.28,
+    "calmar": 0.124
+  },
+  "Ensemble (vote\u22651)": {
+    "params": "2 strategies, threshold=1",
+    "sharpe": 0.171,
+    "return": 0.28,
+    "calmar": 0.124
+  },
+  "Ensemble (vote\u22652)": {
+    "params": "3 strategies, threshold=2",
+    "sharpe": 0.171,
+    "return": 0.28,
+    "calmar": 0.124
+  }
+}
