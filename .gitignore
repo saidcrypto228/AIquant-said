@@ -26,4 +26,6 @@ bot_state.json
 .DS_Store
 Thumbs.db
 .vscode/
-.idea/
+.idea/artifacts/ 
+backups/ 
+models/ 
