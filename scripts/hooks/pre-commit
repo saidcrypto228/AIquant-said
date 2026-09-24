@@ -1,6 +1,0 @@
-#!/usr/bin/env sh
-# Regenerate the Colab notebook from its single source (scripts/build_colab.py,
-# which reads run defaults from aiquant/defaults.py) and stage it, so a stale
-# AIQuant_Colab.ipynb can never be committed. Install once with scripts/install_hooks.sh.
-python scripts/build_colab.py >/dev/null || python3 scripts/build_colab.py >/dev/null
-git add AIQuant_Colab.ipynb
