@@ -1,45 +1,7 @@
-# ── Core data & numerics ─────────────────────────────────────────────────────
 pandas>=2.0.0
 numpy>=1.24.0
-scipy>=1.10.0
-pyarrow>=14.0.0
-fastparquet>=2023.10.0
-
-# ── Technical analysis ────────────────────────────────────────────────────────
-ta>=0.11.0                  # Technical Analysis library (RSI, MACD, Bollinger, etc.)
-
-# ── Machine learning ─────────────────────────────────────────────────────────
-scikit-learn>=1.2.0
 xgboost>=2.0.0
-lightgbm>=4.0.0
-joblib>=1.2.0
-
-# ── Statistical modelling ─────────────────────────────────────────────────────
-statsmodels>=0.14.0
-
-# ── JIT compilation ───────────────────────────────────────────────────────────
-numba>=0.58.0
-
-# ── Backtesting ───────────────────────────────────────────────────────────────
-backtrader>=1.9.78.123
-
-# ── Charting ─────────────────────────────────────────────────────────────────
 matplotlib>=3.7.0
-
-# ── Hyperliquid execution ─────────────────────────────────────────────────────
-hyperliquid>=0.4.66
-eth_account>=0.8.0
-
-# ── Networking & utilities ────────────────────────────────────────────────────
-requests>=2.31.0
-python-dotenv>=1.0.0
-pyyaml>=6.0
-
-# ── Exchange connectivity (optional, for future multi-exchange support) ────────
-ccxt>=4.0.0
-
-# ── Dev tools (optional — comment out if not needed) ─────────────────────────
-jupyterlab>=4.0.0
-pytest>=7.3.0
-black>=23.3.0
-flake8>=6.0.0
+pyarrow>=12.0.0
+hyperliquid-python-sdk>=0.4.0
+eth-account>=0.10.0
