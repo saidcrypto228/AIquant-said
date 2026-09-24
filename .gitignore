@@ -1,31 +1,20 @@
-# --- Байткод и кэши Python ---
+# Байткод и кэш Python
 __pycache__/
 *.py[cod]
 *$py.class
-.pytest_cache/
 .ipynb_checkpoints/
 
-# --- Тяжелые данные и маркет-дата ---
-data/
-*.parquet
-*.csv
-!examples/*.csv
-
-# --- Результаты бэктестов и логи ---
+# Логи и временные файлы runtime
 logs/
-results/*.csv
-results/*.png
-bot_state.json
+*.log
+*.tmp
+*.zip
 
-# --- Секреты, ключи и конфиги окружения ---
+# Чувствительные данные и локальный стейт
 .env
-*.pem
-*.key
+data/orderflow_state.json
+data/bot_state.json
 
-# --- Системный мусор и IDE ---
+# Системные файлы ОС
 .DS_Store
 Thumbs.db
-.vscode/
-.idea/artifacts/ 
-backups/ 
-models/ 
