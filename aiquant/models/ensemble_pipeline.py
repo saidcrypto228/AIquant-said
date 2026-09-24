@@ -7,7 +7,7 @@ def compute_triple_barrier_labels(
     high_arr,
     low_arr,
     atr_arr,
-    timeout_bars=180,
+    timeout_bars=24,
     stop_mult=1.8,
     target_ratio=1.25,
     min_stop_pct=0.0030
@@ -153,9 +153,29 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     n      = len(df)
     c      = df['close'].to_numpy(np.float64)
     dates  = df.index
-    sma_trend = pd.Series(c).rolling(100, min_periods=1).mean().to_numpy()
-    bullish_regime = c > sma_trend
-    bearish_regime = c < sma_trend
+    # Истинный институциональный макро-режим:
+    # 4H EMA-50 на 15m свечах = 50 * 16 = 800 баров (~8.3 суток)
+    # Если в df уже есть каузальный mtf_4h_structure_regime, используем его
+    # Истинный институциональный макро-режим (50 Daily EMA):
+    # 50 дней * 24 часа * 4 бара = 4800 баров 15m свечей (~50 суток)
+    # Быстрый фильтр (4H EMA-50): 800 баров (~8.3 суток)
+    # Если режимы уже предрассчитаны для каждого актива изолированно:
+    if 'bullish_regime' in df.columns and 'bearish_regime' in df.columns:
+        bullish_regime = df['bullish_regime'].to_numpy(dtype=bool)
+        bearish_regime = df['bearish_regime'].to_numpy(dtype=bool)
+    else:
+        macro_daily_ema50 = pd.Series(c).ewm(span=4800, min_periods=200).mean().to_numpy()
+        macro_4h_ema50    = pd.Series(c).ewm(span=800, min_periods=100).mean().to_numpy()
+        macro_bull = c > macro_daily_ema50
+        macro_bear = c < macro_daily_ema50
+
+        if 'mtf_4h_structure_regime' in df.columns:
+            struct = df['mtf_4h_structure_regime'].to_numpy()
+            bullish_regime = (struct > 0) & macro_bull
+            bearish_regime = (struct < 0) & macro_bear & (c < macro_4h_ema50)
+        else:
+            bullish_regime = macro_bull & (c > macro_4h_ema50)
+            bearish_regime = macro_bear & (c < macro_4h_ema50)
 
     # -- Memory banner --------------------------------------------------------
     try:
@@ -173,22 +193,23 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
 
     # -- Label generation ----------------------------------------------------
     print("\n  [*] [1/5] Generating labels (volatility-scaled triple barrier)...")
-    TIMEOUT_BARS = 180
+    TIMEOUT_BARS = 24
     FORWARD_BARS = TIMEOUT_BARS
     open_arr = df["open"].to_numpy(dtype=np.float64)
     high_arr = df["high"].to_numpy(dtype=np.float64)
     low_arr  = df["low"].to_numpy(dtype=np.float64)
     atr_vals = df["atr_14"].to_numpy(dtype=np.float64) if "atr_14" in df.columns else np.zeros(n, dtype=np.float64)
 
+    # 15m Institutional Triple Barrier: SL >= 0.90%, TP = 1.40R, Horizon = 16 bars (4h)
     labels = compute_triple_barrier_labels(
         open_arr=open_arr,
         high_arr=high_arr,
         low_arr=low_arr,
         atr_arr=atr_vals,
         timeout_bars=TIMEOUT_BARS,
-        stop_mult=2.5,
-        target_ratio=1.35,
-        min_stop_pct=0.0060
+        stop_mult=2.0,
+        target_ratio=1.15,
+        min_stop_pct=0.0090
     )
 
     valid_mask = np.zeros(n, dtype=bool)
@@ -201,9 +222,26 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     # ------------------ Feature selection ------------------
     print(f"\n  {CYAN('[*]')}  [2/5] Feature selection (mutual information)...")
 
-    drop_cols    = ['open', 'high', 'low', 'close', 'volume']
+    # Исключаем все нестационарные признаки в долларах
+    banned_prefixes = ('sma_', 'ema_', 'wma_', 'hma_', 'dema_', 'tema_')
+    drop_cols = {
+        'open', 'high', 'low', 'close', 'volume', 'quote_volume',
+        'macro_daily_ema50', 'macro_4h_ema50',
+        'dc_high', 'dc_low', 'dc_mid',
+        'bb_high', 'bb_low', 'bb_mid',
+        'kc_high', 'kc_low', 'kc_mid',
+        'vwap', 'vwap_upper', 'vwap_lower',
+        'pivot', 'r1', 's1', 'r2', 's2', 'r3', 's3',
+        'swing_high', 'swing_low',
+        'asset_id', 'bullish_regime', 'bearish_regime'
+    }
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    feature_cols = [c_ for c_ in numeric_cols if c_ not in drop_cols]
+    feature_cols = [
+        c_ for c_ in numeric_cols 
+        if c_ not in drop_cols 
+        and not c_.startswith(banned_prefixes)
+        and not c_.startswith('target')
+    ]
 
     # Load saved top features if available вЂ” avoids building the full X_all matrix
     params_path = CONFIG_DIR / 'ml_best_params.json'
@@ -270,12 +308,21 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     # Training window : 1/6 of total days, clamped to [7d, 90d]
     # Test/step window: sized so total folds в‰€ 50, clamped to [1d, 30d]
     # Fallback to fixed 30d/7d if fewer than 10 folds would result.
-    BARS_PER_DAY = 1440
+    # Dynamic BARS_PER_DAY calculation based on bar frequency
+    try:
+        dt_seconds = (df.index[1] - df.index[0]).total_seconds()
+        BARS_PER_DAY = max(1, int(86400 / dt_seconds)) if dt_seconds > 0 else 96
+    except Exception:
+        BARS_PER_DAY = 96  # fallback for 15m
+
+    # На 15m барах эмбарго (FORWARD_BARS) равно 16 барам (4 часа) вместо старых 180 минут
+    FORWARD_BARS = min(FORWARD_BARS, 16) if 'FORWARD_BARS' in locals() or 'FORWARD_BARS' in globals() else 16
+
     TARGET_FOLDS = 50
     total_usable = n - FORWARD_BARS
     days_total   = total_usable / BARS_PER_DAY
 
-    train_days = max(7, min(90, int(days_total / 6)))
+    train_days = max(20, min(60, int(days_total * 0.45)))
     TRAIN_BARS = train_days * BARS_PER_DAY
     step_days  = max(1, min(30, int((days_total - train_days) / TARGET_FOLDS)))
     TEST_BARS  = step_days * BARS_PER_DAY
@@ -413,12 +460,26 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         lgb_model.fit(X_tr_s, y_tr)
         lgb_proba = lgb_model.predict_proba(X_te_s)
 
+        # Безопасное выравнивание вероятностей по классам [0: Short, 1: Flat, 2: Long]
+        def _align_3class_proba(model, proba, n_rows):
+            out = np.zeros((n_rows, 3), dtype=np.float64)
+            classes = getattr(model, 'classes_', None)
+            if classes is None or len(classes) == proba.shape[1] == 3:
+                return proba
+            for col_i, cls_val in enumerate(classes):
+                if 0 <= cls_val < 3 and col_i < proba.shape[1]:
+                    out[:, int(cls_val)] = proba[:, col_i]
+            return out
+
+        xgb_p = _align_3class_proba(xgb_model, xgb_proba, len(te_idx))
+        lgb_p = _align_3class_proba(lgb_model, lgb_proba, len(te_idx))
+
         # Store calibrated class probabilities
-        oos_p0[te_idx] = 0.5 * xgb_proba[:, 0] + 0.5 * lgb_proba[:, 0]
-        oos_p1[te_idx] = 0.5 * xgb_proba[:, 1] + 0.5 * lgb_proba[:, 1]
-        oos_p2[te_idx] = 0.5 * xgb_proba[:, 2] + 0.5 * lgb_proba[:, 2]
-        oos_xgb[te_idx]  = xgb_proba[:, 2] - xgb_proba[:, 0]
-        oos_lgb[te_idx]  = lgb_proba[:, 2] - lgb_proba[:, 0]
+        oos_p0[te_idx] = 0.5 * xgb_p[:, 0] + 0.5 * lgb_p[:, 0]
+        oos_p1[te_idx] = 0.5 * xgb_p[:, 1] + 0.5 * lgb_p[:, 1]
+        oos_p2[te_idx] = 0.5 * xgb_p[:, 2] + 0.5 * lgb_p[:, 2]
+        oos_xgb[te_idx]  = xgb_p[:, 2] - xgb_p[:, 0]
+        oos_lgb[te_idx]  = lgb_p[:, 2] - lgb_p[:, 0]
         oos_mask[te_idx] = True
 
         _fold_elapsed = time.time() - _t_fold
@@ -578,36 +639,53 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     # Only evaluate signals where directional conviction strictly dominates FLAT noise
     val_long_cand = (oos_p2[val_idx] > oos_p1[val_idx]) & (oos_p2[val_idx] >= 0.46)
     val_short_cand = (oos_p0[val_idx] > oos_p1[val_idx]) & (oos_p0[val_idx] >= 0.46)
-    # -- Grid calibration on validation fold (High-Conviction Range: 0.52 .. 0.65) --
-    candidates = [0.52, 0.54, 0.56, 0.58, 0.60, 0.62, 0.64]
-    best_long = 0.60
+    # -- Institutional High-Conviction EV-Gate --------------------------------
+    # Жесткий институциональный фильтр отсечения шума (0.60 .. 0.64) и маржа 0.08
+    FLAT_MARGIN = 0.055
+    SHORT_REGIME_PENALTY = 0.06
+
+    candidates = [0.56, 0.58, 0.60, 0.62]
+    best_long = 0.58
     best_short = 0.58
 
     for th in candidates:
-        # Требуем запас над боковиком: P(Direction) - P(Flat) >= 0.08
-        long_cond = (oos_p2[val_idx] >= th) & ((oos_p2[val_idx] - oos_p1[val_idx]) >= 0.08)
-        short_cond = (oos_p0[val_idx] >= th) & ((oos_p0[val_idx] - oos_p1[val_idx]) >= 0.08)
+        long_cond = (oos_p2[val_idx] >= th) & ((oos_p2[val_idx] - oos_p1[val_idx]) >= FLAT_MARGIN)
+        short_cond = (oos_p0[val_idx] >= th) & ((oos_p0[val_idx] - oos_p1[val_idx]) >= FLAT_MARGIN)
         if long_cond.sum() >= 15:
             best_long = th
         if short_cond.sum() >= 15:
             best_short = th
 
-    # Жесткий institutional пол порогов для отсечения шума
-    LONG_HARD_THRESHOLD = max(best_long, 0.60)
+    LONG_HARD_THRESHOLD = max(best_long, 0.58)
     SHORT_HARD_THRESHOLD = max(best_short, 0.58)
-    FLAT_MARGIN = 0.08
 
-    print(f'  [OK] Calibrated EV-Gate thresholds: [P(Long) >= {LONG_HARD_THRESHOLD:.2f} | P(Short) >= {SHORT_HARD_THRESHOLD:.2f} | Margin >= {FLAT_MARGIN:.2f}]')
+    print(f'  [OK] Asymmetric EV-Gate: [P(Long) >= {LONG_HARD_THRESHOLD:.2f} | P(Short) >= {SHORT_HARD_THRESHOLD:.2f} (+{SHORT_REGIME_PENALTY:.2f} in bull) | Margin >= {FLAT_MARGIN:.2f}]')
 
-    # -- FINAL TEST - Signals with High Conviction & Flat Filtering --
+    # -- FINAL TEST: Направленные сигналы с асимметричным шлюзом --
     sig = np.zeros(n, dtype=np.int8)
-    sig[(oos_p2 >= LONG_HARD_THRESHOLD) & ((oos_p2 - oos_p1) >= FLAT_MARGIN)] = 1
-    sig[(oos_p0 >= SHORT_HARD_THRESHOLD) & ((oos_p0 - oos_p1) >= FLAT_MARGIN)] = -1
+
+    # Лонги: базовая уверенность над боковиком
+    long_mask = (oos_p2 >= LONG_HARD_THRESHOLD) & ((oos_p2 - oos_p1) >= FLAT_MARGIN)
+    sig[long_mask] = 1
+
+    # Шорты: СТРОГО запрещены в бычьем макро-режиме (цена выше тренда)
+    short_mask = (~bullish_regime) & (oos_p0 >= SHORT_HARD_THRESHOLD) & ((oos_p0 - oos_p1) >= FLAT_MARGIN)
+    sig[short_mask] = -1
+    # Шорты: СТРОГО запрещены в бычьем макро-режиме (цена выше тренда)
+    short_mask = (~bullish_regime) & (oos_p0 >= SHORT_HARD_THRESHOLD) & ((oos_p0 - oos_p1) >= FLAT_MARGIN)
+    sig[short_mask] = -1
+
+    # Ограничиваем строго финальным тестовым срезом
     sig[~np.isin(np.arange(n), test_idx)] = 0
-    sig[bullish_regime & (sig == -1)] = 0
-    sig[bearish_regime & (sig == 1)] = 0
+
+    # Симметричный институциональный макро-фильтр:
+    # 1. Лонги разрешены ТОЛЬКО в подтвержденном бычьем макро-тренде
+    sig[(sig == 1) & (~bullish_regime)] = 0
+    # 2. Шорты разрешены ТОЛЬКО в подтвержденном медвежьем макро-тренде
+    sig[(sig == -1) & (~bearish_regime)] = 0
 
     execution = simulate_trade_plan(
+        probs=np.maximum(oos_p2, oos_p0),
         signal=sig,
         open_=df["open"].to_numpy(dtype=np.float64),
         high=df["high"].to_numpy(dtype=np.float64),
@@ -620,7 +698,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         capital=capital,
         risk_per_trade=0.005,
         min_rr=0.5,
-        timeout_bars=180,
+        timeout_bars=24,
         timestamps=df.index.to_numpy(),
         save_csv=True,
         csv_path=RESULTS_DIR / "trade_log.csv",
@@ -689,7 +767,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         f"MaxDD={best_r['max_dd']:.2f}%  "
         f"PF={best_r['pf']:.3f}  "
         f"Trades={best_r['trades']:,}  "
-        f"WR={best_r['win_rate']:.1f}%  "
+        f"WR={best_r.get('win_rate', best_r.get('wr', 0.0)):.1f}%  "
         f"[L>{best_long} S<{best_short}]"
     )
 
@@ -842,7 +920,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     calmar_str = f"{best_r['calmar']:>22.4f}"
     pf_str     = f"{best_r['pf']:>22.3f}x"
     dd_str     = f"{best_r['max_dd']:.2f}%"
-    wr_str     = f"{best_r['win_rate']:.1f}%"
+    wr_str     = f"{best_r.get('win_rate', best_r.get('wr', 0.0)):.1f}%"
     lt_str     = f"{best_r['long_thresh']:>22}"
     st_str     = f"{best_r['short_thresh']:>22}"
     print()
@@ -895,7 +973,7 @@ def _save_ml_chart(df, best_r, pair, capital, ens_score, oos_mask, days=None):
             f"AIQuant  |  ML Ensemble (XGB+LGB+LSTM)  |  {pair}  |  {days}-Day Backtest\n"
             f"Sharpe {best_r['sharpe']:+.3f}  |  Return {best_r['ret']:+.1f}%  |  "
             f"MaxDD {best_r['max_dd']:.1f}%  |  Calmar {best_r['calmar']:.3f}  |  "
-            f"{best_r['trades']:,} trades  |  {best_r['win_rate']:.1f}% win rate  |  "
+            f"{best_r['trades']:,} trades  |  {best_r.get('win_rate', best_r.get('wr', 0.0)):.1f}% win rate  |  "
             f"Profit Factor {best_r['pf']:.2f}x",
             color='white', fontsize=11, fontweight='bold', y=0.99
         )

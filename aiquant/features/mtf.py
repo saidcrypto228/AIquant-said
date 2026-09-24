@@ -95,18 +95,22 @@ def build_mtf_features(
 
     # ---------------------------------------------------------
     # Align completed 4H + 1H features back to source rows.
+    # STRICT CAUSALITY: Shift HTF features by 1 bar so candles only see 
+    # fully closed HTF bars (e.g., at 12:00 only 08:00-12:00 bar is known).
     # ---------------------------------------------------------
+    mtf_4h_causal = mtf_4h.sort_index().shift(1)
     result = pd.merge_asof(
         result.sort_index(),
-        mtf_4h.sort_index(),
+        mtf_4h_causal,
         left_index=True,
         right_index=True,
         direction="backward",
     )
 
+    mtf_1h_causal = mtf_1h.sort_index().shift(1)
     result = pd.merge_asof(
         result.sort_index(),
-        mtf_1h.sort_index(),
+        mtf_1h_causal,
         left_index=True,
         right_index=True,
         direction="backward",

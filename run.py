@@ -135,6 +135,10 @@ def load_data(pair: str = 'BTCUSDT', days: int = 1825) -> pd.DataFrame:
     close_max = df['close'].max()
     print(f"  {DIM(f'Price range: ${close_min:,.0f} → ${close_max:,.0f}')}")
 
+    # 15m Resampling
+    df = df.resample('15min').agg({
+        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+    }).dropna()
     return df
 
 

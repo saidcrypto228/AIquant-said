@@ -230,3 +230,5 @@ results/*.csv
 
 # ML model artifacts
 models/*.pkl
+data/BTCUSDT_15m.csv 
+backups/ 
