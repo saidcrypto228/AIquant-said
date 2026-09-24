@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Institutional Long Pullback with Confirmation Bar (BTC 1H).
-Targets: Max DD < 8%, Daily DD < 4%, Capital $10,000.
+Institutional 1H BTC Engine (Dual-Tranche Proven Clean Benchmark).
+50% TP1 at 1.2 ATR, 50% TP2 at 3.0 ATR. Risk 0.6%.
+Hard limits: Max DD < 8.0%, Daily Loss < $200, Monoposition.
 """
 
 import sys
@@ -13,30 +14,31 @@ import matplotlib.pyplot as plt
 
 DATA_PATH = Path("data/BTCUSDT_15m.csv")
 if not DATA_PATH.exists():
-    print("[-] Ошибка: Файл data/BTCUSDT_15m.csv не найден.")
+    print(f"[-] Ошибка: Файл {DATA_PATH} не найден.")
     sys.exit(1)
 
-print(f"[*] Чтение данных: {DATA_PATH}")
-raw_df = pd.read_csv(DATA_PATH)
-raw_df.columns = [c.lower() for c in raw_df.columns]
+print(f"[*] Загрузка датасета: {DATA_PATH}")
+raw = pd.read_csv(DATA_PATH)
+raw.columns = raw.columns.str.lower()
 
 # 1. Агрегация 15m -> 1H
-n_raw = len(raw_df)
+n_raw = len(raw)
 bar_group = np.arange(n_raw) // 4
 
 df_1h = pd.DataFrame({
-    'open': raw_df['open'].groupby(bar_group).first(),
-    'high': raw_df['high'].groupby(bar_group).max(),
-    'low': raw_df['low'].groupby(bar_group).min(),
-    'close': raw_df['close'].groupby(bar_group).last(),
-    'volume': raw_df['volume'].groupby(bar_group).sum(),
+    'open': raw['open'].groupby(bar_group).first(),
+    'high': raw['high'].groupby(bar_group).max(),
+    'low': raw['low'].groupby(bar_group).min(),
+    'close': raw['close'].groupby(bar_group).last(),
+    'volume': raw['volume'].groupby(bar_group).sum(),
+    'hour': raw['hour'].groupby(bar_group).first() if 'hour' in raw.columns else np.zeros(len(raw)//4)
 }).reset_index(drop=True)
 
-end_time = pd.Timestamp.now().floor('h')
-df_1h['timestamp'] = pd.date_range(end=end_time, periods=len(df_1h), freq='1h')
+df_1h['day_id'] = np.arange(len(df_1h)) // 24
+n_bars = len(df_1h)
+print(f"[+] Сформировано {n_bars:,} 1H баров.")
 
-# 2. Стационарные признаки
-o = df_1h['open']
+# 2. Расчет стационарных признаков
 c = df_1h['close']
 h = df_1h['high']
 l = df_1h['low']
@@ -52,12 +54,13 @@ atr_slow = tr.rolling(window=48, min_periods=48).mean()
 atr_norm = atr_fast / c
 
 features = pd.DataFrame(index=df_1h.index)
-features['timestamp'] = df_1h['timestamp']
 features['open'] = df_1h['open']
 features['high'] = df_1h['high']
 features['low'] = df_1h['low']
 features['close'] = df_1h['close']
 features['volume'] = df_1h['volume']
+features['hour'] = df_1h['hour']
+features['day_id'] = df_1h['day_id']
 features['atr_fast'] = atr_fast
 
 features['log_ret_1h'] = np.log(c / c.shift(1))
@@ -92,47 +95,45 @@ features['dist_ema200_atr'] = (c - ema_200) / atr_fast
 
 clean_df = features.dropna().reset_index(drop=True)
 n_clean = len(clean_df)
-print(f"[+] Сформировано {n_clean:,} 1H баров.")
 
-# 3. Primary Model: Откат + Свечное подтверждение (Bullish Bar Confirmation)
-o_arr = clean_df['open'].to_numpy(dtype=np.float64)
+# 3. Чистый базовый сетап
 c_arr = clean_df['close'].to_numpy(dtype=np.float64)
+o_arr = clean_df['open'].to_numpy(dtype=np.float64)
 h_arr = clean_df['high'].to_numpy(dtype=np.float64)
 l_arr = clean_df['low'].to_numpy(dtype=np.float64)
 atr_arr = clean_df['atr_fast'].to_numpy(dtype=np.float64)
-ts_arr = pd.to_datetime(clean_df['timestamp']).to_numpy()
+day_arr = clean_df['day_id'].to_numpy(dtype=np.int32)
 
 ema_25 = pd.Series(c_arr).ewm(span=25, adjust=False).mean().to_numpy()
 ema_100 = pd.Series(c_arr).ewm(span=100, adjust=False).mean().to_numpy()
 rsi_arr = (clean_df['rsi_norm'].to_numpy() * 50.0) + 50.0
 
-# Условия: Аптренд + Откат + Бар закрылся в плюс (C > O) с закрытием в верхней половине
 macro_bull = c_arr > ema_100
-pullback_state = (rsi_arr < 45.0) | (l_arr <= ema_25)
-bull_bar = (c_arr > o_arr) & (c_arr >= (h_arr + l_arr) / 2.0)
-primary_signals = macro_bull & pullback_state & bull_bar
+pullback = (rsi_arr < 42.0) | (l_arr <= ema_25)
+primary_signals = macro_bull & pullback
 
-# Возвращаем проверенные барьеры Теста А
-SL_MULT = 1.20
-TP_MULT = 1.80   # RR = 1.50
-TIMEOUT_BARS = 20
+SL_MULT = 1.30
+TP1_MULT = 1.20   # 50% объема
+TP2_MULT = 3.00   # 50% объема
+TIMEOUT_BARS = 36
 
 # 4. Разметка Meta-Labels
 meta_labels = np.full(n_clean, np.nan)
-for i in range(n_clean - TIMEOUT_BARS):
+for i in range(n_clean - TIMEOUT_BARS - 1):
     if not primary_signals[i]:
         continue
-    entry = c_arr[i]
+    entry = o_arr[i + 1]
     cur_atr = atr_arr[i]
     sl_price = entry - (cur_atr * SL_MULT)
-    tp_price = entry + (cur_atr * TP_MULT)
-    
+    tp1_price = entry + (cur_atr * TP1_MULT)
+
     success = 0
     for k in range(1, TIMEOUT_BARS + 1):
-        if l_arr[i + k] <= sl_price:
+        idx = i + k
+        if l_arr[idx] <= sl_price:
             success = 0
             break
-        if h_arr[i + k] >= tp_price:
+        if h_arr[idx] >= tp1_price:
             success = 1
             break
     meta_labels[i] = success
@@ -141,21 +142,29 @@ setup_indices = np.where(~np.isnan(meta_labels))[0]
 y_meta = meta_labels[setup_indices].astype(int)
 
 X_cols = [
-    'log_ret_1h', 'log_ret_4h', 'log_ret_24h',
-    'trend_spread_atr', 'vol_compression', 'parkinson_to_atr',
+    'log_ret_1h', 'log_ret_4h', 'log_ret_24h', 
+    'trend_spread_atr', 'vol_compression', 'parkinson_to_atr', 
     'bar_pressure', 'volume_zscore', 'rsi_norm', 'dist_ema200_atr'
 ]
 X_meta = clean_df.loc[setup_indices, X_cols].to_numpy(dtype=np.float32)
-print(f"[+] Отобрано подтвержденных лонг-сетапов: {len(setup_indices):,}")
-print(f"[+] Базовый винрейт эвристики: {(y_meta == 1).mean() * 100:.2f}%")
 
-# 5. Обучение Meta-XGBoost
-TRAIN_SIZE = int(len(setup_indices) * 0.65)
-X_train, y_train = X_meta[:TRAIN_SIZE], y_meta[:TRAIN_SIZE]
-X_test,  y_test  = X_meta[TRAIN_SIZE:], y_meta[TRAIN_SIZE:]
+print(f"[+] Всего сетапов: {len(setup_indices):,}")
+
+# 5. Обучение Meta-XGBoost с зазором
+TRAIN_RATIO = 0.65
+split_idx = int(len(setup_indices) * TRAIN_RATIO)
+train_setup_indices = setup_indices[:split_idx]
+
+last_train_bar = train_setup_indices[-1]
+test_start_bar = last_train_bar + TIMEOUT_BARS + 1
+test_setup_indices = setup_indices[setup_indices >= test_start_bar]
+
+X_train = clean_df.loc[train_setup_indices, X_cols].to_numpy(dtype=np.float32)
+y_train = meta_labels[train_setup_indices].astype(int)
+X_test  = clean_df.loc[test_setup_indices, X_cols].to_numpy(dtype=np.float32)
 
 pos_count = sum(y_train)
-scale_pos = (len(y_train) - pos_count) / pos_count
+scale_pos = (len(y_train) - pos_count) / max(pos_count, 1)
 
 meta_clf = xgb.XGBClassifier(
     n_estimators=100,
@@ -170,91 +179,123 @@ meta_clf = xgb.XGBClassifier(
 meta_clf.fit(X_train, y_train)
 test_probs = meta_clf.predict_proba(X_test)[:, 1]
 
-# 6. Бэктест OOS с PropGuard
+setup_prob_map = {bar: prob for bar, prob in zip(test_setup_indices, test_probs)}
+
+# 6. Бэктест OOS (Clean Proven Settings)
 INITIAL_CAPITAL = 10000.0
 equity = INITIAL_CAPITAL
+peak_equity = equity
 equity_curve = [equity]
 trades = []
 
 FEE_PCT = 0.0012
-RISK_PCT = 0.0060
+RISK_PCT = 0.0060        # 0.6% ($60 риска)
 CONF_THRESHOLD = 0.55
 
-test_setup_bars = setup_indices[TRAIN_SIZE:]
-setup_map = {bar: prob for bar, prob in zip(test_setup_bars, test_probs)}
-
-oos_start = test_setup_bars[0]
 in_pos = False
 entry_bar = 0
 entry_price = 0.0
 pos_size_usd = 0.0
-cur_day = None
-daily_pnl = 0.0
+sl_price = 0.0
+tp1_price = 0.0
+tp2_price = 0.0
+tp1_hit = False
+
+cur_day_id = None
+daily_realized_pnl = 0.0
 day_locked = False
+system_halted = False
+
+oos_start = test_setup_indices[0]
 
 for i in range(oos_start, n_clean - 1):
-    bar_date = pd.Timestamp(ts_arr[i]).date()
-    if bar_date != cur_day:
-        cur_day = bar_date
-        daily_pnl = 0.0
+    bar_day = day_arr[i]
+
+    if bar_day != cur_day_id:
+        cur_day_id = bar_day
+        daily_realized_pnl = 0.0
         day_locked = False
-        
+
+    if system_halted:
+        equity_curve.append(equity)
+        continue
+
     if in_pos:
         dur = i - entry_bar
         cur_h = h_arr[i]
         cur_l = l_arr[i]
         cur_c = c_arr[i]
-        
-        sl_price = entry_price - (atr_arr[entry_bar] * SL_MULT)
-        tp_price = entry_price + (atr_arr[entry_bar] * TP_MULT)
-        
-        exit_trade = False
+
+        # 1. Первый транш (50%)
+        if not tp1_hit and cur_h >= tp1_price:
+            tp1_hit = True
+            net_ret1 = (tp1_price / entry_price - 1.0) - FEE_PCT
+            pnl1 = (pos_size_usd * 0.5) * net_ret1
+            equity += pnl1
+            daily_realized_pnl += pnl1
+
+        exit_remaining = False
         exit_p = cur_c
         reason = ""
-        
+
         if cur_l <= sl_price:
             exit_p = sl_price
-            reason = "SL"
-            exit_trade = True
-        elif cur_h >= tp_price:
-            exit_p = tp_price
-            reason = "TP"
-            exit_trade = True
+            reason = "SL_AFTER_TP1" if tp1_hit else "SL_FULL"
+            exit_remaining = True
+        elif tp1_hit and cur_h >= tp2_price:
+            exit_p = tp2_price
+            reason = "TP2_FULL_WIN"
+            exit_remaining = True
         elif dur >= TIMEOUT_BARS:
             exit_p = cur_c
             reason = "TIMEOUT"
-            exit_trade = True
-                
-        if exit_trade:
-            net_ret = (exit_p / entry_price - 1.0) - FEE_PCT
-            pnl = pos_size_usd * net_ret
-            equity += pnl
-            daily_pnl += pnl
+            exit_remaining = True
+
+        if exit_remaining:
+            rem_fraction = 0.5 if tp1_hit else 1.0
+            net_ret2 = (exit_p / entry_price - 1.0) - FEE_PCT
+            pnl2 = (pos_size_usd * rem_fraction) * net_ret2
+            equity += pnl2
+            daily_realized_pnl += pnl2
+
+            total_trade_pnl = (pnl1 + pnl2) if tp1_hit else pnl2
             trades.append({
-                "entry_time": ts_arr[entry_bar],
-                "exit_time": ts_arr[i],
-                "side": "LONG",
+                "entry_bar": entry_bar,
+                "exit_bar": i,
                 "entry": entry_price,
                 "exit": exit_p,
-                "pnl": pnl,
+                "pnl": total_trade_pnl,
                 "reason": reason
             })
             in_pos = False
-            
-            if daily_pnl <= -200.0:
+            tp1_hit = False
+
+            if daily_realized_pnl <= -200.0:
                 day_locked = True
-                
+
+    peak_equity = max(peak_equity, equity)
+    drawdown = (peak_equity - equity) / peak_equity
+    if drawdown >= 0.08:
+        print(f"[!] АВАРИЙНЫЙ ХАРД-СТОП: Достигнут лимит просадки {drawdown*100:.2f}%! Торги остановлены.")
+        system_halted = True
+
     equity_curve.append(equity)
-    
-    if not in_pos and not day_locked and i in setup_map:
-        p_win = setup_map[i]
-        if p_win >= CONF_THRESHOLD:
-            entry_price = c_arr[i]
-            entry_bar = i
-            in_pos = True
-            
-            stop_dist_pct = (atr_arr[i] * SL_MULT) / entry_price
-            pos_size_usd = min((equity * RISK_PCT) / stop_dist_pct, equity * 1.5)
+
+    if not in_pos and not day_locked and not system_halted and i in setup_prob_map:
+        if setup_prob_map[i] >= CONF_THRESHOLD:
+            next_idx = i + 1
+            if next_idx < n_clean:
+                entry_price = o_arr[next_idx]
+                entry_bar = next_idx
+                in_pos = True
+                tp1_hit = False
+
+                sl_price = entry_price - (atr_arr[i] * SL_MULT)
+                tp1_price = entry_price + (atr_arr[i] * TP1_MULT)
+                tp2_price = entry_price + (atr_arr[i] * TP2_MULT)
+
+                stop_dist_pct = (atr_arr[i] * SL_MULT) / entry_price
+                pos_size_usd = min((equity * RISK_PCT) / stop_dist_pct, equity * 1.5)
 
 # 7. Итоговая аналитика
 df_res = pd.DataFrame(trades)
@@ -270,12 +311,12 @@ wr = (len(win_t) / len(df_res)) * 100.0 if len(df_res) > 0 else 0.0
 pf = (win_t['pnl'].sum() / abs(lose_t['pnl'].sum())) if len(lose_t) > 0 else 0.0
 
 print("=" * 65)
-print("  ИТОГИ ПОДТВЕРЖДЕННОЙ СИСТЕМЫ (PROP READY)")
+print("  ИТОГИ: ВОССТАНОВЛЕННЫЙ ЭТАЛОН DUAL-TRANCHE")
 print("=" * 65)
 print(f"Начальный баланс     : ${INITIAL_CAPITAL:,.2f}")
 print(f"Конечный баланс      : ${equity:,.2f}")
 print(f"Чистый PnL           : {total_ret:+.2f}%")
-print(f"Максимальная просадка: {max_dd:.2f}% (Норматив: < 8.0%)")
+print(f"Максимальная просадка: {max_dd:.2f}% (Лимит: < 8.0%)")
 print(f"Всего сделок         : {len(df_res)} (~{len(df_res)/9:.1f} сделок/мес)")
 print(f"Win Rate             : {wr:.1f}%")
 print(f"Profit Factor        : {pf:.3f}")
@@ -284,16 +325,15 @@ if len(df_res) > 0:
     print(df_res['reason'].value_counts())
 print("=" * 65)
 
-# 8. Сохранение логов и графика
 results_dir = Path("results")
 results_dir.mkdir(parents=True, exist_ok=True)
 df_res.to_csv(results_dir / "prop_trades_log.csv", index=False)
 
 plt.figure(figsize=(12, 6))
 plt.subplot(2, 1, 1)
-plt.plot(eq_arr, label="Equity Curve ($)", color="#1f77b4", lw=1.5)
+plt.plot(eq_arr, label="Equity ($)", color="#1f77b4", lw=1.5)
 plt.axhline(INITIAL_CAPITAL, color="gray", linestyle="--", alpha=0.7)
-plt.title("Prop Challenge Strategy Equity (1H Bull Confirmation)")
+plt.title("Prop Challenge Pure Baseline Equity (1H BTC)")
 plt.ylabel("Balance ($)")
 plt.grid(True, alpha=0.3)
 plt.legend()
@@ -302,7 +342,7 @@ plt.subplot(2, 1, 2)
 plt.plot(dd * 100.0, label="Drawdown (%)", color="#d62728", lw=1.2)
 plt.axhline(-8.0, color="black", linestyle="--", label="Prop Limit (-8%)")
 plt.ylabel("Drawdown (%)")
-plt.xlabel("Hours")
+plt.xlabel("Bars (1H)")
 plt.grid(True, alpha=0.3)
 plt.legend()
 
@@ -310,5 +350,4 @@ chart_path = results_dir / "prop_backtest_chart.png"
 plt.tight_layout()
 plt.savefig(chart_path, dpi=150)
 plt.close()
-print(f"[+] График сохранен в: {chart_path}")
-print(f"[+] Лог сохранен в: {results_dir / 'prop_trades_log.csv'}")
+print(f"[+] Результаты сохранены в results/")
