@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Комплексный стресс-тест квантовых модулей v10.8 (Alpha Expansion Suite).
+Комплексный стресс-тест квантовых модулей v10.9 (Institutional Microstructure Suite).
 Всего тестов: 20 (Precision: 4, Math: 8, OrderFlow: 3, Risk: 3, ML: 2).
 """
 
@@ -94,6 +94,21 @@ try:
     z_f = QuantFactorEngine.compute_funding_zscore(fake_funding)
     assert z_f >= 2.5
     test_results.append(("Math: Funding Overheat Detection (Z >= 2.5)", True, f"Z={z_f:.2f} (Перегрев обнаружен)"))
+
+    # 9. Волатильность Гармана-Класса
+    o_s = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0] * 3)
+    h_s = pd.Series([102.0, 103.0, 104.0, 105.0, 106.0] * 3)
+    l_s = pd.Series([99.0,  100.0, 101.0, 102.0, 103.0] * 3)
+    c_s = pd.Series([101.0, 102.0, 103.0, 104.0, 105.0] * 3)
+    gk = QuantFactorEngine.compute_garman_klass_volatility(o_s, h_s, l_s, c_s)
+    assert 0.0 < gk < 0.1, f"GK volatility unexpected: {gk}"
+    test_results.append(("Math: Garman-Klass Volatility Engine", True, f"GK_vol={gk:.4f}"))
+
+    # 10. Delta OI Robust Z-Score
+    fake_oi = [10000.0 + (i * 10) for i in range(30)] + [15000.0]  # Резкий спайк набора OI
+    z_oi = QuantFactorEngine.compute_delta_oi_robust_zscore(fake_oi, lookback=24)
+    assert z_oi == 3.0, f"Expected clipping at 3.0, got {z_oi}"
+    test_results.append(("Math: Delta OI Robust MAD Z-Score", True, f"Z_OI={z_oi:.2f} (Клиппинг подтвержден)"))
 except Exception as e:
     test_results.append(("Math: Engine failure on edge cases", False, str(e)))
 

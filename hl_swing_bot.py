@@ -349,6 +349,7 @@ class HyperliquidSwingBot:
                 "cvd_ratio": coin_data.get("cvd_ratio", 0.0),
                 "cvd_usd": coin_data.get("cvd_usd", 0.0),
                 "obi_10": coin_data.get("obi_10", 0.0),
+                "delta_oi_z": coin_data.get("delta_oi_z", 0.0),
                 "last_px": coin_data.get("last_px", 0.0),
                 "is_fresh": True
             }
@@ -634,7 +635,7 @@ class HyperliquidSwingBot:
                     del self.pending_triggers[coin]
                     continue
 
-                # Институциональный фильтр OBI_10 (защита от стены лимитных заявок против входа)
+                # 1. Институциональный фильтр OBI_10 (защита от стены лимитных заявок против входа)
                 obi_val = of_m.get("obi_10", 0.0)
                 if is_long and obi_val < -0.25:
                     logger.warning(f"[OBI FILTER] {coin}: Стена продавцов в стакане (OBI={obi_val:.2f} < -0.25). Вход отклонен.")
@@ -642,6 +643,25 @@ class HyperliquidSwingBot:
                     continue
                 elif not is_long and obi_val > +0.25:
                     logger.warning(f"[OBI FILTER] {coin}: Стена покупателей в стакане (OBI={obi_val:.2f} > +0.25). Вход отклонен.")
+                    del self.pending_triggers[coin]
+                    continue
+
+                # 2. Economic Cost Gate (защита от ловушки трения комиссий и проскальзывания)
+                if entry_px <= 0.0:
+                    del self.pending_triggers[coin]
+                    continue
+                stop_dist_pct = abs(entry_px - trg["sl_px"]) / entry_px
+                MIN_ECONOMIC_STOP_PCT = 0.0120  # 1.20% минимальная экономическая дистанция
+                if stop_dist_pct < MIN_ECONOMIC_STOP_PCT:
+                    logger.warning(f"[ECONOMIC COST GATE] {coin}: Стоп {stop_dist_pct*100:.2f}% < 1.20%. Трение съест матожидание. Вход отменен.")
+                    del self.pending_triggers[coin]
+                    continue
+
+                # 3. Фильтр Delta OI (запрет входа в шорт-сквиз ловушки: рост цены при агрессивном закрытии позиций)
+                raw_doi = of_m.get("delta_oi_z")
+                doi_z = float(raw_doi) if raw_doi is not None else 0.0
+                if is_long and doi_z < -2.5:
+                    logger.warning(f"[DELTA OI GATE] {coin}: Рост на агрессивном закрытии позиций (Z_OI={doi_z:.2f} < -2.5). Вход отклонен.")
                     del self.pending_triggers[coin]
                     continue
 

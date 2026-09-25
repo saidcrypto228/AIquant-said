@@ -350,13 +350,19 @@ def simulate_v10_7(start_idx: int, end_idx: int, title: str):
                             else:
                                 sl_price = base_sl
 
-                            pending_triggers[coin] = {
-                                "direction": "LONG", "entry_type": "PULLBACK" if valid_pb else "BREAKOUT",
-                                "trigger_px": row["high"] * 1.0005,
-                                "sl_px": sl_price,
-                                "expiry_t": curr_t + (3 * 3600 * 1000), "atr": atr, "ml_prob": prob
-                            }
-                            active_assets.add(coin)
+                            # Economic Cost Gate: проверка минимально допустимой дистанции стопа (1.20%)
+                            trg_entry = row["high"] * 1.0005
+                            stop_dist_pct = (trg_entry - sl_price) / trg_entry
+                            MIN_ECONOMIC_STOP_PCT = 0.0120
+
+                            if stop_dist_pct >= MIN_ECONOMIC_STOP_PCT:
+                                pending_triggers[coin] = {
+                                    "direction": "LONG", "entry_type": "PULLBACK" if valid_pb else "BREAKOUT",
+                                    "trigger_px": trg_entry,
+                                    "sl_px": sl_price,
+                                    "expiry_t": curr_t + (3 * 3600 * 1000), "atr": atr, "ml_prob": prob
+                                }
+                                active_assets.add(coin)
 
                 # Шорт-сетапы
                 elif btc_bear and btc_slope_rel < -0.30 and z_res_mom <= -0.40 and raw_rs_pct <= -2.5:
