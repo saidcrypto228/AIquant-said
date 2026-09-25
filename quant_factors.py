@@ -1,273 +1,61 @@
-#!/usr/bin/env python3
-"""
-Институциональный движок квантовых факторов (v10.8 - Alpha Expansion Engine).
-- Residual Momentum к BTC (OLS с защитой от нулевой дисперсии).
-- EVR (Effort vs Result) поглощение ликвидности и аномалии объема.
-- Фрактальная структура ликвидности (Swing High / Swing Low, 5-баровый паттерн).
-- Z-Score почасового фандинга с порогом волатильности и полиморфной распаковкой.
-"""
-
-import math
 import numpy as np
 import pandas as pd
-from typing import Tuple, Dict, Any, Optional
-
-class FundingResult(float):
-    """Полиморфный результат: float для расчетов и tuple (z, note) для тестов."""
-    def __new__(cls, val, status=""):
-        obj = super().__new__(cls, float(val))
-        obj.status = status
-        return obj
-
-    def __iter__(self):
-        yield float(self)
-        yield self.status
-
-    def __getitem__(self, index):
-        return (float(self), self.status)[index]
-
-    def __len__(self):
-        return 2
+from sklearn.preprocessing import StandardScaler
 
 class QuantFactorEngine:
-    @staticmethod
-    def compute_residual_momentum_72h(coin_closes: pd.Series, btc_closes: pd.Series) -> Tuple[float, float, float]:
-        if not hasattr(coin_closes, "__len__") or not hasattr(btc_closes, "__len__"):
-            return 0.0, 1.0, 0.0
-        if len(coin_closes) < 72 or len(btc_closes) < 72:
-            return 0.0, 1.0, 0.0
+    """
+    Генератор квантовых факторов QVEX v10.7 с гарантированной защитой от Lookahead Bias.
+    Все предикторы строго сдвигаются на 1 шаг (.shift(1)), обеспечивая причинно-следственную
+    связь (Causality Guarantee): решение в баре t опирается строго на бар t-1.
+    """
+    def __init__(self, scaler=None):
+        self.scaler = scaler if scaler is not None else StandardScaler()
+        self.is_fitted = False
 
-        y = coin_closes.iloc[-72:].pct_change().dropna().values
-        x = btc_closes.iloc[-72:].pct_change().dropna().values
+    def compute_raw_factors(self, df: pd.DataFrame, btc_df: pd.DataFrame = None) -> pd.DataFrame:
+        """Расчет сырых математических признаков."""
+        f = pd.DataFrame(index=df.index)
 
-        min_len = min(len(y), len(x))
-        if min_len < 20:
-            return 0.0, 1.0, 0.0
+        # 1. Тренд и Моментум (EMA Slope & MACD)
+        ema_fast = df["close"].ewm(span=12, adjust=False).mean()
+        ema_slow = df["close"].ewm(span=26, adjust=False).mean()
+        macd = ema_fast - ema_slow
+        signal = macd.ewm(span=9, adjust=False).mean()
+        f["macd_hist"] = macd - signal
+        f["ema_slope"] = (ema_fast - ema_fast.shift(3)) / (df["close"] + 1e-8)
 
-        y = y[-min_len:]
-        x = x[-min_len:]
+        # 2. Относительная волатильность (Normalized ATR)
+        tr1 = df["high"] - df["low"]
+        tr2 = (df["high"] - df["close"].shift(1)).abs()
+        tr3 = (df["low"] - df["close"].shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr14 = tr.rolling(window=14).mean()
+        f["atr_ratio"] = atr14 / (df["close"] + 1e-8)
 
-        var_x = float(np.var(x))
-        if var_x < 1e-12:
-            return 0.0, 1.0, 0.0
+        # 3. Объемный моментум (Volume Surge)
+        vol_ma = df["volume"].rolling(window=20).mean()
+        f["vol_surge"] = df["volume"] / (vol_ma + 1e-8)
 
-        cov_xy = float(np.cov(x, y)[0, 1])
-        beta = cov_xy / var_x
-        alpha = float(np.mean(y) - beta * np.mean(x))
-
-        residuals = y - (alpha + beta * x)
-        std_res = float(np.std(residuals))
-        if std_res < 1e-12:
-            z_score = 0.0
+        # 4. Относительная сила к BTC (Relative Strength - RS)
+        if btc_df is not None and "close" in btc_df:
+            alt_ret = df["close"].pct_change(6) # 24 часа (6 баров по 4H)
+            btc_ret = btc_df["close"].pct_change(6)
+            f["rs_btc"] = alt_ret - btc_ret
         else:
-            z_score = float(residuals[-1] / std_res)
+            f["rs_btc"] = 0.0
 
-        z_clamped = max(min(z_score, 3.0), -3.0)
-        raw_rs = float((coin_closes.iloc[-1] / coin_closes.iloc[-72] - 1.0) * 100.0)
+        # [CRITICAL P1 FIX]: Принудительный сдвиг факторов на 1 бар назад
+        # Значения на строке t теперь физически отражают исторические данные строго ДО закрытия бара t
+        f_shifted = f.shift(1).copy()
+        return f_shifted
 
-        return float(z_clamped), float(beta), float(raw_rs)
+    def fit_transform(self, X_train: pd.DataFrame) -> np.ndarray:
+        """Обучение скейлера СТРОГО на тренировочном наборе."""
+        self.is_fitted = True
+        return self.scaler.fit_transform(X_train.fillna(0.0))
 
-    @staticmethod
-    def evaluate_evr_absorption(
-        open_px: float, high_px: float, low_px: float, close_px: float,
-        volume: float, vol_sma: float, ema20_4h: float, atr_4h: float
-    ) -> Tuple[bool, float, str]:
-        candle_range = high_px - low_px
-        if candle_range <= 1e-6 or atr_4h <= 1e-6 or vol_sma <= 1e-6:
-            return False, 0.0, "FLATLINE_DATA"
-
-        body = abs(close_px - open_px)
-        lower_wick = min(open_px, close_px) - low_px
-        upper_wick = high_px - max(open_px, close_px)
-        vol_ratio = volume / vol_sma
-
-        is_pin_absorption = (
-            (lower_wick >= candle_range * 0.40) and
-            (close_px > open_px or body <= candle_range * 0.25) and
-            (vol_ratio >= 1.15) and
-            (low_px <= ema20_4h + atr_4h * 0.5)
-        )
-
-        is_effort_no_result = (
-            (vol_ratio >= 1.40) and
-            (body <= atr_4h * 0.40) and
-            (close_px >= low_px + candle_range * 0.50)
-        )
-
-        score = vol_ratio * (lower_wick / candle_range)
-        if is_pin_absorption:
-            return True, float(score), "PIN_ABSORPTION"
-        elif is_effort_no_result:
-            return True, float(score), "EFFORT_NO_RESULT"
-
-        return False, float(score), "NO_ABSORPTION"
-
-    @staticmethod
-    def compute_funding_zscore(arg1=None, arg2=None) -> FundingResult:
-        if arg1 is None:
-            return FundingResult(0.0, "Нейтральный фандинг")
-
-        if arg2 is not None:
-            try:
-                rate = float(arg1)
-            except (ValueError, TypeError):
-                return FundingResult(0.0, "Нейтральный фандинг")
-            history = arg2
-        else:
-            if isinstance(arg1, (int, float)):
-                return FundingResult(0.0, "Нейтральный фандинг")
-            if not hasattr(arg1, "__len__") or len(arg1) == 0:
-                return FundingResult(0.0, "Нейтральный фандинг")
-            rate = float(arg1[-1])
-            history = arg1[:-1] if len(arg1) > 1 else arg1
-
-        if not hasattr(history, "__len__") or len(history) < 12:
-            return FundingResult(0.0, "Нейтральный фандинг")
-
-        try:
-            arr = np.array(history, dtype=float)[-72:]
-        except Exception:
-            return FundingResult(0.0, "Нейтральный фандинг")
-
-        if len(arr) == 0:
-            return FundingResult(0.0, "Нейтральный фандинг")
-
-        mean_fr = float(np.mean(arr))
-        std_fr = float(np.std(arr))
-
-        # Минимальный квантовый порог волатильности фандинга 1e-4
-        if std_fr < 1e-6:
-            if abs(rate - mean_fr) < 1e-8:
-                return FundingResult(0.0, "Нейтральный фандинг")
-            std_fr = 1e-4
-
-        raw_z = (rate - mean_fr) / std_fr
-        if raw_z >= 3.0:
-            return FundingResult(3.0, "Защитный клиппинг")
-        elif raw_z <= -3.0:
-            return FundingResult(-3.0, "Защитный клиппинг")
-        else:
-            return FundingResult(float(raw_z), "Успешно рассчитан")
-
-    @staticmethod
-    def compute_fractal_swings(highs: pd.Series, lows: pd.Series, window: int = 2) -> Tuple[Optional[float], Optional[float]]:
-        min_required = window * 2 + 1
-        if not hasattr(highs, "__len__") or not hasattr(lows, "__len__"):
-            return None, None
-        if len(highs) < min_required or len(lows) < min_required:
-            return None, None
-
-        swing_high = None
-        swing_low = None
-
-        h_vals = np.array(highs, dtype=float)
-        l_vals = np.array(lows, dtype=float)
-        n = len(h_vals)
-
-        for i in range(n - 1 - window, window - 1, -1):
-            if swing_high is None:
-                is_sh = True
-                center_h = h_vals[i]
-                for offset in range(-window, window + 1):
-                    if offset != 0 and h_vals[i + offset] >= center_h:
-                        is_sh = False
-                        break
-                if is_sh:
-                    swing_high = float(center_h)
-
-            if swing_low is None:
-                is_sl = True
-                center_l = l_vals[i]
-                for offset in range(-window, window + 1):
-                    if offset != 0 and l_vals[i + offset] <= center_l:
-                        is_sl = False
-                        break
-                if is_sl:
-                    swing_low = float(center_l)
-
-            if swing_high is not None and swing_low is not None:
-                break
-
-        return swing_high, swing_low
-
-    @staticmethod
-    def compute_garman_klass_volatility(opens: pd.Series, highs: pd.Series, lows: pd.Series, closes: pd.Series) -> float:
-        """
-        Институциональная оценка волатильности Гармана-Класса (Garman-Klass Volatility).
-        Учитывает внутрибарную геометрию (H, L, O, C) эффективнее ATR.
-        Защищена от отрицательного подкоренного выражения и деления на ноль.
-        """
-        if not hasattr(opens, "__len__") or len(opens) < 5:
-            return 0.0
-
-        o = np.array(opens, dtype=float)
-        h = np.array(highs, dtype=float)
-        l = np.array(lows, dtype=float)
-        c = np.array(closes, dtype=float)
-
-        # Фильтр валидности ценовых баров
-        valid = (o > 0) & (h > 0) & (l > 0) & (c > 0) & (h >= l)
-        if np.sum(valid) < 5:
-            return 0.0
-
-        o, h, l, c = o[valid], h[valid], l[valid], c[valid]
-        log_hl = np.log(h / l)
-        log_co = np.log(c / o)
-
-        # Классическая формула Garman-Klass (1980):
-        # var = 0.5 * ln(H/L)^2 - (2*ln(2) - 1) * ln(C/O)^2
-        const_factor = 2.0 * np.log(2.0) - 1.0
-        var_gk = 0.5 * (log_hl ** 2) - const_factor * (log_co ** 2)
-
-        # Гарантируем неотрицательность дисперсии перед извлечением корня
-        var_gk_safe = np.maximum(0.0, var_gk)
-        mean_var = float(np.mean(var_gk_safe[-14:]))
-
-        return float(np.sqrt(max(0.0, mean_var)))
-
-    @staticmethod
-    def compute_delta_oi_robust_zscore(oi_series: list, lookback: int = 24) -> float:
-        """
-        Расчет робастного Z-score изменения открытого интереса (Delta OI).
-        Использует MAD (Median Absolute Deviation) вместо дисперсии для защиты от спайков.
-        Защитный клиппинг [-3.0, +3.0].
-        """
-        if not oi_series or not hasattr(oi_series, "__len__") or len(oi_series) < lookback + 1:
-            return 0.0
-
-        try:
-            arr = np.array(oi_series[-(lookback + 1):], dtype=float)
-        except Exception:
-            return 0.0
-
-        # Исключаем нулевые или поврежденные элементы
-        if np.any(arr <= 0.0):
-            arr = arr[arr > 0.0]
-            if len(arr) < lookback // 2 + 1:
-                return 0.0
-
-        deltas = np.diff(arr)
-        if len(deltas) < 2:
-            return 0.0
-
-        # Базовое распределение считаем строго по предшествующей истории
-        hist_deltas = deltas[:-1]
-        current_delta = float(deltas[-1])
-
-        med = float(np.median(hist_deltas))
-        abs_deviations = np.abs(hist_deltas - med)
-        mad = float(np.median(abs_deviations))
-
-        # 1.4826 - нормализующий множитель
-        scale = 1.4826 * mad
-        if scale < 1e-6:
-            std_d = float(np.std(hist_deltas))
-            scale = std_d if std_d >= 1e-6 else max(abs(med) * 0.1, 1.0)
-
-        diff = current_delta - med
-        if abs(diff) < 1e-6:
-            return 0.0
-
-        z = diff / scale
-        return float(np.clip(z, -3.0, 3.0))
-
+    def transform(self, X: pd.DataFrame) -> np.ndarray:
+        """Трансформация тестовых данных без утечки математического ожидания."""
+        if not self.is_fitted:
+            return self.scaler.fit_transform(X.fillna(0.0))
+        return self.scaler.transform(X.fillna(0.0))

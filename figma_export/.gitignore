@@ -1,0 +1,36 @@
+# Байткод и временные файлы Python / Jupyter
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+Untitled*.ipynb
+
+# Системные временные файлы и логи
+logs/
+*.log
+*.tmp
+*.zip
+
+# Бэкапы и тяжелые локальные архивы
+backups/
+archive/
+
+# Сырые исторические маркет-датасеты (CSV, Parquet)
+data/raw/
+data/history_deep/
+data/universe/
+data/*.csv
+data/*.parquet
+
+# Стейт выполнения и чувствительные данные
+.env
+data/orderflow_state.json
+data/bot_state.json
+
+# Отчеты и визуализации бэктестов
+results/*.csv
+results/*.png
+
+# Системные файлы ОС
+.DS_Store
+Thumbs.db

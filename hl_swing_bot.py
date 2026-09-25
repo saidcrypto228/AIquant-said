@@ -1,3 +1,4 @@
+from qvex_utils import atomic_write_json
 #!/usr/bin/env python3
 """
 Hyperliquid 4H Swing Bot (Production v10.7 - Institutional Hardened Engine).
@@ -33,13 +34,13 @@ from tg_visualizer import TelegramVisualizer, esc
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] HLBot-v10.7: %(message)s",
+    format="%(asctime)s [%(levelname)s] QVEX-v10.7: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
         logging.FileHandler(config.LOG_DIR / "bot_runtime.log", encoding="utf-8")
     ]
 )
-logger = logging.getLogger("HLBot-v10.7")
+logger = logging.getLogger("QVEX-v10.7")
 
 class AsyncTelegramNotifier:
     @staticmethod
@@ -217,12 +218,10 @@ class HyperliquidSwingBot:
 
     def save_state(self):
         try:
-            tmp = config.STATE_FILE.with_suffix(f".{os.getpid()}.tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.state, f, indent=2)
-            os.replace(tmp, config.STATE_FILE)
-        except Exception as e:
-            logger.error(f"[-] Ошибка сохранения state: {e}")
+            from qvex_utils import atomic_write_json
+            atomic_write_json(self.state_file, self.state)
+        except Exception as err:
+            logger.error(f"[-] Ошибка сохранения стейта: {err}")
 
     def predict_meta_prob(self, raw_features: list) -> float:
         if not self.meta_weights:
@@ -277,11 +276,21 @@ class HyperliquidSwingBot:
                         "unrealized_pnl": float(p.get("unrealizedPnl", 0.0)),
                         "position_value": float(p.get("positionValue", 0.0))
                     }
+            if isinstance(self.state.get('positions'), list):
+                self.state['positions'] = {
+                    p['symbol']: p
+                    for p in self.state['positions']
+                    if isinstance(p, dict) and 'symbol' in p
+                }
+            elif not isinstance(self.state.get('positions'), dict):
+                self.state['positions'] = {}
 
-            for coin in list(self.state["positions"].keys()):
+            for coin in list(self.state['positions'].keys()):
                 if coin not in actual_positions:
-                    logger.warning(f"[RECONCILE] Позиция {coin} закрыта на бирже. Удаление из стейта.")
-                    del self.state["positions"][coin]
+                    logger.warning(
+                        f'[RECONCILE] Позиция {coin} закрыта.'
+                    )
+                    del self.state['positions'][coin]
                     self.save_state()
                 else:
                     onchain = actual_positions[coin]
@@ -313,6 +322,7 @@ class HyperliquidSwingBot:
                 else:
                     pos["stop_oid"] = stops[-1].get("oid")
 
+        
         except Exception as e:
             logger.error(f"[-] Сбой ончейн-реконсиляции: {e}")
 
@@ -826,7 +836,7 @@ class HyperliquidSwingBot:
 
     def start(self):
         logger.info("=" * 75)
-        logger.info("  HYPERLIQUID SWING BOT v10.7 (INSTITUTIONAL HARDENED)")
+        logger.info("  QVEX: QUANTITATIVE VECTOR EXECUTION v10.7 (INSTITUTIONAL HARDENED)")
         logger.info(f"  Сеть: {'TESTNET' if self.is_testnet else 'MAINNET'} | Адрес: {self.address}")
         logger.info("=" * 75)
         while True:

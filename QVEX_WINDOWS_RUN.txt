@@ -1,0 +1,11 @@
+QVEX — запуск Windows
+
+1) Откройте Jupyter и выполните QVEX_BUILD_INDEX.ipynb (только одна Code cell).
+2) Откройте CMD / Anaconda Prompt:
+
+cd /d D:\Projects\qvex
+conda activate qvex
+taskkill /F /IM python.exe
+python run_system.py
+
+Jupyter НЕ используется для запуска серверов.
