@@ -23,7 +23,7 @@ print("=" * 85)
 print("  БЭКТЕСТЕР v10.7: HARDENED PORTFOLIO RISK & SLIPPAGE STRESS (0.25%)")
 print("=" * 85)
 
-clean_target_coins = [c for c in config.TARGET_COINS if c not in ["ETH", "LINK", "PEPE", "kPEPE", "WIF"]]
+clean_target_coins = ['SOL', 'AVAX', 'NEAR', 'RENDER', 'APT', 'SUI', 'DOGE', 'TIA', 'ARB', 'OP', 'INJ', 'LINK']
 
 model_path = config.DATA_DIR / "meta_model.json"
 with open(model_path, "r", encoding="utf-8") as f:
@@ -117,7 +117,7 @@ TAKER_FEE = 0.00035
 SLIPPAGE_PENALTY = 0.0025
 HOURLY_FUNDING = 0.000012
 
-def simulate_v10_7(start_idx: int, end_idx: int, title: str):
+def simulate_v10_7(start_idx, end_idx, title="", mode="v11"):
     cash = INITIAL_CAPITAL
     equity_curve = [cash]
     trades = []
@@ -247,7 +247,14 @@ def simulate_v10_7(start_idx: int, end_idx: int, title: str):
         total_margin = sum(p["margin"] for p in open_positions.values())
 
         for c_name, pos in open_positions.items():
-            c_cur_px = processed_1h[c_name][processed_1h[c_name]["t"] == curr_t].iloc[0]["close"]
+            c_match = processed_1h[c_name][processed_1h[c_name]["t"] == curr_t]
+            if not c_match.empty:
+                c_cur_px = c_match.iloc[0]["close"]
+            else:
+                c_past = processed_1h[c_name][processed_1h[c_name]["t"] <= curr_t]
+                if c_past.empty:
+                    continue
+                c_cur_px = c_past.iloc[-1]["close"]
             if pos["direction"] == "LONG":
                 total_unrealized += (c_cur_px - pos["entry_px"]) * pos["sz"]
             else:
@@ -300,98 +307,174 @@ def simulate_v10_7(start_idx: int, end_idx: int, title: str):
 
         equity_curve.append(current_equity)
 
-        # 3. ПОИСК СИГНАЛОВ
+        # 3. ПОИСК СИГНАЛОВ (A/B РЕЖИМЫ: v10.7 vs v11.0)
+        btc_closes = btc_df[btc_df["t"] <= curr_t]["close"]
         active_assets = set(open_positions.keys()) | set(pending_triggers.keys())
-        if len(active_assets) < max_slots:
-            btc_closes = btc_df[btc_df["t"] <= curr_t]["close"]
 
-            for coin in clean_target_coins:
-                if coin in active_assets or len(active_assets) >= max_slots:
-                    continue
+        if mode == "v10_7":
+            # --- БАЗОВЫЙ v10.7: СТРОГО 2 СЛОТА, БЕЗ RECYCLING, FIFO ---
+            can_open = len(active_assets) < 2
+            if can_open:
+                for coin in clean_target_coins:
+                    if coin in active_assets or len(active_assets) >= 2:
+                        continue
+                    if coin not in processed_1h:
+                        continue
 
-                c_df = processed_1h[coin]
-                c_hist = c_df[c_df["t"] <= curr_t]
-                if len(c_hist) < 72:
-                    continue
+                    c_df = processed_1h[coin]
+                    c_hist = c_df[c_df["t"] <= curr_t]
+                    if len(c_hist) < 72:
+                        continue
 
-                row = c_hist.iloc[-1]
-                z_res_mom, beta_btc, raw_rs_pct = QuantFactorEngine.compute_residual_momentum_72h(c_hist["close"], btc_closes)
-                atr = row["atr_4h"]
+                    row = c_hist.iloc[-1]
+                    z_res_mom, beta_btc, raw_rs_pct = QuantFactorEngine.compute_residual_momentum_72h(c_hist["close"], btc_closes)
+                    atr = row["atr_4h"]
 
-                # Лонг-сетапы
-                if btc_bull and z_res_mom >= 0.40 and raw_rs_pct >= 2.0:
-                    is_trend = (row["close"] > row["ema50_4h"]) and (row["ema20_4h"] > row["ema50_4h"])
-                    is_evr_ok, _, _ = QuantFactorEngine.evaluate_evr_absorption(
-                        open_px=row["open"], high_px=row["high"], low_px=row["low"], close_px=row["close"],
-                        volume=row["vol_rolling_4h"], vol_sma=row["vol_sma20_4h"], ema20_4h=row["ema20_4h"], atr_4h=atr
-                    )
-                    breakout_hit = (row["close"] >= row["donchian_high_4h"] * 0.998)
-                    vol_boost = row["vol_rolling_4h"] >= row["vol_sma20_4h"] * 1.15
-                    valid_bo = breakout_hit and vol_boost and (btc_slope_rel > 0.15)
-                    valid_pb = is_trend and is_evr_ok
+                    if btc_bull and z_res_mom >= 0.40 and raw_rs_pct >= 2.0:
+                        is_trend = (row["close"] > row["ema50_4h"]) and (row["ema20_4h"] > row["ema50_4h"])
+                        is_evr_ok, _, _ = QuantFactorEngine.evaluate_evr_absorption(
+                            open_px=row["open"], high_px=row["high"], low_px=row["low"], close_px=row["close"],
+                            volume=row["vol_rolling_4h"], vol_sma=row["vol_sma20_4h"], ema20_4h=row["ema20_4h"], atr_4h=atr
+                        )
+                        breakout_hit = (row["close"] >= row["donchian_high_4h"] * 0.998)
+                        vol_boost = row["vol_rolling_4h"] >= row["vol_sma20_4h"] * 1.15
+                        valid_bo = breakout_hit and vol_boost and (btc_slope_rel > 0.15)
+                        valid_pb = is_trend and is_evr_ok
 
-                    if valid_pb or valid_bo:
-                        raw_feats = [
-                            z_res_mom, beta_btc, raw_rs_pct,
-                            min(row["vol_rolling_4h"] / max(row["vol_sma20_4h"], 1e-4), 5.0),
-                            (atr / row["close"]) * 100.0,
-                            (row["close"] - row["ema20_4h"]) / max(atr, 1e-4),
-                            (row["close"] - row["donchian_low_4h"]) / max(row["donchian_high_4h"] - row["donchian_low_4h"], 1e-4),
-                            btc_slope_rel, 1.0 if valid_bo else 0.0, 1.0
-                        ]
-                        prob = predict_meta_prob(raw_feats)
-                        if prob >= 0.48:
-                            base_sl = row["low"] - (atr * 0.85) if valid_pb else row["close"] - (atr * 1.50)
-                            sh_f, sl_f = QuantFactorEngine.compute_fractal_swings(c_hist["high"], c_hist["low"], window=2)
+                        if valid_pb or valid_bo:
+                            raw_feats = [
+                                z_res_mom, beta_btc, raw_rs_pct,
+                                min(row["vol_rolling_4h"] / max(row["vol_sma20_4h"], 1e-4), 5.0),
+                                (atr / row["close"]) * 100.0,
+                                (row["close"] - row["ema20_4h"]) / max(atr, 1e-4),
+                                (row["close"] - row["donchian_low_4h"]) / max(row["donchian_high_4h"] - row["donchian_low_4h"], 1e-4),
+                                btc_slope_rel, 1.0 if valid_bo else 0.0, 1.0
+                            ]
+                            prob = predict_meta_prob(raw_feats)
+                            if prob >= 0.50:
+                                base_sl = row["low"] - (atr * 0.85) if valid_pb else row["close"] - (atr * 1.50)
+                                sh_f, sl_f = QuantFactorEngine.compute_fractal_swings(c_hist["high"], c_hist["low"], window=2)
+                                if sl_f and sl_f < row["close"] and (row["close"] - sl_f) >= (atr * 0.80):
+                                    sl_price = max(base_sl, sl_f * 0.999)
+                                else:
+                                    sl_price = base_sl
 
-                            # Фрактальный стоп: если подтвержденный свинговый минимум ближе 1.5 ATR (но >= 0.8 ATR)
-                            if sl_f and sl_f < row["close"] and (row["close"] - sl_f) >= (atr * 0.80):
-                                sl_price = max(base_sl, sl_f * 0.999)
-                            else:
-                                sl_price = base_sl
+                                trg_entry = row["high"] * 1.0005
+                                stop_dist_pct = (trg_entry - sl_price) / trg_entry
+                                if stop_dist_pct >= 0.0120:
+                                    pending_triggers[coin] = {
+                                        "direction": "LONG", "entry_type": "PULLBACK" if valid_pb else "BREAKOUT",
+                                        "trigger_px": trg_entry, "sl_px": sl_price,
+                                        "expiry_t": curr_t + (3 * 3600 * 1000), "atr": atr, "ml_prob": prob
+                                    }
+                                    active_assets.add(coin)
 
-                            # Economic Cost Gate: проверка минимально допустимой дистанции стопа (1.20%)
-                            trg_entry = row["high"] * 1.0005
-                            stop_dist_pct = (trg_entry - sl_price) / trg_entry
-                            MIN_ECONOMIC_STOP_PCT = 0.0120
+        else:
+            # --- РЕЖИМ v11.0: 3 СЛОТА, PRIORITY RANKING, RISK RECYCLING, BTC GATE ---
+            MAX_PORTFOLIO_HEAT_PCT = 0.040
+            STRESS_GAP_ALLOWANCE = 0.005
+            current_active_risk = 0.0
+            for p in open_positions.values():
+                if p["sl_px"] >= p["entry_px"]:
+                    current_active_risk += p["sz"] * p["entry_px"] * STRESS_GAP_ALLOWANCE
+                else:
+                    current_active_risk += p["sz"] * max(0.0, p["entry_px"] - p["sl_px"])
+            for t in pending_triggers.values():
+                current_active_risk += (current_equity * 0.01)
 
-                            if stop_dist_pct >= MIN_ECONOMIC_STOP_PCT:
-                                pending_triggers[coin] = {
-                                    "direction": "LONG", "entry_type": "PULLBACK" if valid_pb else "BREAKOUT",
-                                    "trigger_px": trg_entry,
-                                    "sl_px": sl_price,
-                                    "expiry_t": curr_t + (3 * 3600 * 1000), "atr": atr, "ml_prob": prob
-                                }
-                                active_assets.add(coin)
+            available_risk = max(0.0, (current_equity * MAX_PORTFOLIO_HEAT_PCT) - current_active_risk)
+            btc_dumping = ((btc_row["close"] < btc_row["ema20_4h"] * 0.992) and (btc_slope_rel < -0.05)) or (btc_slope_rel < -0.15)
+            can_open_new = (available_risk >= (current_equity * 0.008)) and (len(open_positions) < 3) and (not btc_dumping)
 
-                # Шорт-сетапы
-                elif btc_bear and btc_slope_rel < -0.30 and z_res_mom <= -0.40 and raw_rs_pct <= -2.5:
-                    is_bear_trend = (row["close"] < row["ema50_4h"]) and (row["ema20_4h"] < row["ema50_4h"])
-                    breakdown_hit = (row["close"] <= row["donchian_low_4h"] * 1.002)
-                    vol_boost = row["vol_rolling_4h"] >= row["vol_sma20_4h"] * 1.15
-                    is_bear_pb = is_bear_trend and (row["high"] >= row["ema20_4h"] * 0.995) and (row["close"] <= row["ema20_4h"])
-                    valid_short_bo = breakdown_hit and vol_boost
+            SECTOR_MAP = {
+                "SOL": "L1", "AVAX": "L1", "NEAR": "L1", "SUI": "L1", "APT": "L1",
+                "ARB": "L2", "OP": "L2", "TIA": "MODULAR",
+                "LINK": "DEFI", "INJ": "DEFI", "RENDER": "AI", "DOGE": "MEME"
+            }
+            active_sectors = [SECTOR_MAP.get(c, "OTHER") for c in open_positions.keys()]
 
-                    if is_bear_pb or valid_short_bo:
-                        raw_feats = [
-                            z_res_mom, beta_btc, raw_rs_pct,
-                            min(row["vol_rolling_4h"] / max(row["vol_sma20_4h"], 1e-4), 5.0),
-                            (atr / row["close"]) * 100.0,
-                            (row["close"] - row["ema20_4h"]) / max(atr, 1e-4),
-                            (row["close"] - row["donchian_low_4h"]) / max(row["donchian_high_4h"] - row["donchian_low_4h"], 1e-4),
-                            btc_slope_rel, 1.0 if valid_short_bo else 0.0, 0.0
-                        ]
-                        prob = predict_meta_prob(raw_feats)
-                        if prob >= 0.48:
-                            sl_price = row["high"] + (atr * 0.85) if is_bear_pb else row["close"] + (atr * 1.50)
+            if can_open_new:
+                candidates = []
+                for coin in clean_target_coins:
+                    if coin in active_assets or coin not in processed_1h:
+                        continue
 
-                            pending_triggers[coin] = {
-                                "direction": "SHORT", "entry_type": "BEAR_PULLBACK" if is_bear_pb else "BEAR_BREAKDOWN",
-                                "trigger_px": row["low"] * 0.9995,
-                                "sl_px": sl_price,
-                                "expiry_t": curr_t + (3 * 3600 * 1000), "atr": atr, "ml_prob": prob
-                            }
-                            active_assets.add(coin)
+                    c_df = processed_1h[coin]
+                    c_hist = c_df[c_df["t"] <= curr_t]
+                    if len(c_hist) < 72:
+                        continue
+
+                    row = c_hist.iloc[-1]
+                    z_res_mom, beta_btc, raw_rs_pct = QuantFactorEngine.compute_residual_momentum_72h(c_hist["close"], btc_closes)
+                    atr = row["atr_4h"]
+
+                    if btc_bull and z_res_mom >= 0.40 and raw_rs_pct >= 2.0:
+                        is_trend = (row["close"] > row["ema50_4h"]) and (row["ema20_4h"] > row["ema50_4h"])
+                        is_evr_ok, _, _ = QuantFactorEngine.evaluate_evr_absorption(
+                            open_px=row["open"], high_px=row["high"], low_px=row["low"], close_px=row["close"],
+                            volume=row["vol_rolling_4h"], vol_sma=row["vol_sma20_4h"], ema20_4h=row["ema20_4h"], atr_4h=atr
+                        )
+                        breakout_hit = (row["close"] >= row["donchian_high_4h"] * 0.998)
+                        vol_boost = row["vol_rolling_4h"] >= row["vol_sma20_4h"] * 1.15
+                        valid_bo = breakout_hit and vol_boost and (btc_slope_rel > 0.15)
+                        valid_pb = is_trend and is_evr_ok
+
+                        if valid_pb or valid_bo:
+                            raw_feats = [
+                                z_res_mom, beta_btc, raw_rs_pct,
+                                min(row["vol_rolling_4h"] / max(row["vol_sma20_4h"], 1e-4), 5.0),
+                                (atr / row["close"]) * 100.0,
+                                (row["close"] - row["ema20_4h"]) / max(atr, 1e-4),
+                                (row["close"] - row["donchian_low_4h"]) / max(row["donchian_high_4h"] - row["donchian_low_4h"], 1e-4),
+                                btc_slope_rel, 1.0 if valid_bo else 0.0, 1.0
+                            ]
+                            prob = predict_meta_prob(raw_feats)
+                            if prob >= 0.50:
+                                base_sl = row["low"] - (atr * 0.85) if valid_pb else row["close"] - (atr * 1.50)
+                                sh_f, sl_f = QuantFactorEngine.compute_fractal_swings(c_hist["high"], c_hist["low"], window=2)
+                                if sl_f and sl_f < row["close"] and (row["close"] - sl_f) >= (atr * 0.80):
+                                    sl_price = max(base_sl, sl_f * 0.999)
+                                else:
+                                    sl_price = base_sl
+
+                                trg_entry = row["high"] * 1.0005
+                                stop_dist_pct = (trg_entry - sl_price) / trg_entry
+                                if stop_dist_pct >= 0.0120:
+                                    candidates.append({
+                                        "coin": coin, "score": prob * max(0.1, z_res_mom),
+                                        "prob": prob, "valid_pb": valid_pb,
+                                        "trg_entry": trg_entry, "sl_price": sl_price,
+                                        "atr": atr, "sector": SECTOR_MAP.get(coin, "OTHER")
+                                    })
+
+                candidates.sort(key=lambda x: x["score"], reverse=True)
+
+                for cand in candidates:
+                    c_coin = cand["coin"]
+                    c_sec = cand["sector"]
+
+                    if c_sec != "OTHER" and active_sectors.count(c_sec) >= 2:
+                        continue
+                    if available_risk < (current_equity * 0.008):
+                        break
+                    if len(open_positions) + len(pending_triggers) >= 3:
+                        break
+
+                    # Tiered Conviction: 3-й слот резервируется только под сильные сетапы (prob >= 0.65)
+                    current_slots_occupied = len(open_positions) + len(pending_triggers)
+                    if current_slots_occupied == 2 and cand["prob"] < 0.65:
+                        continue
+
+                    pending_triggers[c_coin] = {
+                        "direction": "LONG",
+                        "entry_type": "PULLBACK" if cand["valid_pb"] else "BREAKOUT",
+                        "trigger_px": cand["trg_entry"], "sl_px": cand["sl_price"],
+                        "expiry_t": curr_t + (3 * 3600 * 1000), "atr": cand["atr"], "ml_prob": cand["prob"]
+                    }
+                    active_assets.add(c_coin)
+                    if c_sec != "OTHER":
+                        active_sectors.append(c_sec)
+                    available_risk -= (current_equity * 0.01)
 
     final_eq = equity_curve[-1]
     df_t = pd.DataFrame(trades)
@@ -432,7 +515,135 @@ def simulate_v10_7(start_idx: int, end_idx: int, title: str):
     print("=" * 85)
 
 # 1. In-Sample
-simulate_v10_7(min_warmup, split_idx, "1. IN-SAMPLE ПЕРИОД v10.7 (37 ДНЕЙ)")
 
-# 2. Строгий Out-of-Sample со штрафом проскальзывания 0.25%
-simulate_v10_7(oos_start_idx, total_bars, "2. СТРОГИЙ OUT-OF-SAMPLE v10.7 (13 ДНЕЙ)")
+    # Надежный расчет метрик для A/B баттла
+    start_eq = equity_curve[0]
+    final_eq = equity_curve[-1]
+    net_val = final_eq - start_eq
+    pct_val = (net_val / start_eq) * 100.0
+
+    peak = start_eq
+    dd_val = 0.0
+    for eq in equity_curve:
+        if eq > peak:
+            peak = eq
+        dd = (peak - eq) / peak * 100.0
+        if dd > dd_val:
+            dd_val = dd
+
+    wins_pnl = 0.0
+    loss_pnl = 0.0
+    wins_cnt = 0
+    loss_cnt = 0
+
+    for item in long_trades:
+        if isinstance(item, str):
+            parts = [p.strip() for p in item.split("|")]
+            if len(parts) >= 7:
+                try:
+                    tok = parts[6].split()[0].replace("$", "")
+                    val = float(tok)
+                    if val > 0:
+                        wins_pnl += val
+                        wins_cnt += 1
+                    elif val < 0:
+                        loss_pnl += abs(val)
+                        loss_cnt += 1
+                except Exception:
+                    pass
+        elif isinstance(item, dict):
+            val = item.get("pnl_usd", item.get("pnl", 0.0))
+            if val > 0:
+                wins_pnl += val
+                wins_cnt += 1
+            elif val < 0:
+                loss_pnl += abs(val)
+                loss_cnt += 1
+
+    tot_tr = wins_cnt + loss_cnt
+    wr_val = (wins_cnt / tot_tr * 100.0) if tot_tr > 0 else 0.0
+    pf_val = (wins_pnl / loss_pnl) if loss_pnl > 0 else (999.0 if wins_pnl > 0 else 0.0)
+
+    return {
+        "pnl_usd": net_val, "pnl_pct": pct_val, "win_rate": wr_val,
+        "pf": pf_val, "max_dd": dd_val, "trades": tot_tr
+    }
+
+
+# =====================================================================================
+# ЗАПУСК A/B ТЕСТА: v10.7 vs v11.0 НА ИСТОРИИ HYPERLIQUID
+# =====================================================================================
+clean_target_coins = [c for c in clean_target_coins if c in processed_1h and c != "BTC"]
+if "min_warmup" not in locals():
+    min_warmup = 72
+if "total_bars" not in locals():
+    total_bars = len(processed_1h[clean_target_coins[0]])
+
+split_idx = int((total_bars - min_warmup) * 0.75) + min_warmup
+oos_start_idx = split_idx
+
+is_days = max(1, (split_idx - min_warmup) // 24)
+oos_days = max(1, (total_bars - oos_start_idx) // 24)
+tot_days = is_days + oos_days
+
+print("")
+print("=" * 85)
+print("  СТАРТ СРАВНИТЕЛЬНОГО БАТТЛА: " + str(tot_days) + " ДНЕЙ (IS: " + str(is_days) + " дн | OOS: " + str(oos_days) + " дн)")
+print("=" * 85)
+
+print("")
+print(">>> [РАУНД 1/2] ТЕСТИРОВАНИЕ БАЗОВОГО v10.7 (2 СЛОТА, FIFO, БЕЗ RECYCLING)...")
+r_is_v10 = simulate_v10_7(min_warmup, split_idx, "1. IN-SAMPLE v10.7 (" + str(is_days) + " ДНЕЙ)", mode="v10_7")
+r_oos_v10 = simulate_v10_7(oos_start_idx, total_bars, "2. OUT-OF-SAMPLE v10.7 (" + str(oos_days) + " ДНЕЙ)", mode="v10_7")
+
+print("")
+print(">>> [РАУНД 2/2] ТЕСТИРОВАНИЕ v11.0 (3 СЛОТА, PRIORITY RANKING, RECYCLING, BTC GATE)...")
+r_is_v11 = simulate_v10_7(min_warmup, split_idx, "1. IN-SAMPLE v11.0 (" + str(is_days) + " ДНЕЙ)", mode="v11")
+r_oos_v11 = simulate_v10_7(oos_start_idx, total_bars, "2. OUT-OF-SAMPLE v11.0 (" + str(oos_days) + " ДНЕЙ)", mode="v11")
+
+print("")
+print("=" * 85)
+print("  ИТОГОВЫЙ БАТТЛ: v10.7 (2 слота) vs v11.0 (3 слота + Priority) НА " + str(tot_days) + " ДНЯХ")
+print("=" * 85)
+h_fmt = "{:<24} | {:<26} | {:<26}"
+print(h_fmt.format("МЕТРИКА", "v10.7 (2 слота, Base)", "v11.0 (3 слота, Priority)"))
+print("-" * 85)
+
+pnl_is_10 = "{:>+7.2f}% (${:>+7.2f})".format(r_is_v10["pnl_pct"], r_is_v10["pnl_usd"])
+pnl_is_11 = "{:>+7.2f}% (${:>+7.2f})".format(r_is_v11["pnl_pct"], r_is_v11["pnl_usd"])
+print(h_fmt.format("IS Прибыль (%)", pnl_is_10, pnl_is_11))
+
+dd_is_10 = "{:>6.2f}%".format(r_is_v10["max_dd"])
+dd_is_11 = "{:>6.2f}%".format(r_is_v11["max_dd"])
+print(h_fmt.format("IS Max Drawdown", dd_is_10, dd_is_11))
+
+pf_is_10 = "{:>6.2f}".format(r_is_v10["pf"])
+pf_is_11 = "{:>6.2f}".format(r_is_v11["pf"])
+print(h_fmt.format("IS Profit Factor", pf_is_10, pf_is_11))
+
+tr_is_10 = "{} сд. ({:>5.1f}%)".format(r_is_v10["trades"], r_is_v10["win_rate"])
+tr_is_11 = "{} сд. ({:>5.1f}%)".format(r_is_v11["trades"], r_is_v11["win_rate"])
+print(h_fmt.format("IS Сделок (Win Rate)", tr_is_10, tr_is_11))
+print("-" * 85)
+
+pnl_oos_10 = "{:>+7.2f}% (${:>+7.2f})".format(r_oos_v10["pnl_pct"], r_oos_v10["pnl_usd"])
+pnl_oos_11 = "{:>+7.2f}% (${:>+7.2f})".format(r_oos_v11["pnl_pct"], r_oos_v11["pnl_usd"])
+print(h_fmt.format("OOS Прибыль (%)", pnl_oos_10, pnl_oos_11))
+
+dd_oos_10 = "{:>6.2f}%".format(r_oos_v10["max_dd"])
+dd_oos_11 = "{:>6.2f}%".format(r_oos_v11["max_dd"])
+print(h_fmt.format("OOS Max Drawdown", dd_oos_10, dd_oos_11))
+
+pf_oos_10 = "{:>6.2f}".format(r_oos_v10["pf"])
+pf_oos_11 = "{:>6.2f}".format(r_oos_v11["pf"])
+print(h_fmt.format("OOS Profit Factor", pf_oos_10, pf_oos_11))
+
+tr_oos_10 = "{} сд. ({:>5.1f}%)".format(r_oos_v10["trades"], r_oos_v10["win_rate"])
+tr_oos_11 = "{} сд. ({:>5.1f}%)".format(r_oos_v11["trades"], r_oos_v11["win_rate"])
+print(h_fmt.format("OOS Сделок (Win Rate)", tr_oos_10, tr_oos_11))
+print("-" * 85)
+
+tot_10 = "${:>+7.2f}".format(r_is_v10["pnl_usd"] + r_oos_v10["pnl_usd"])
+tot_11 = "${:>+7.2f}".format(r_is_v11["pnl_usd"] + r_oos_v11["pnl_usd"])
+print(h_fmt.format("ИТОГО ЧИСТЫМИ ($)", tot_10, tot_11))
+print("=" * 85)
