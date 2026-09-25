@@ -1,36 +1,40 @@
-# Байткод и временные файлы Python / Jupyter
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-.ipynb_checkpoints/
-Untitled*.ipynb
+*.so
 
-# Системные временные файлы и логи
+# Environments
+.env
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+
+# Large binaries & OS files
+*.exe
+*.dll
+*.bin
+*.zip
+*.tar.gz
+Thumbs.db
+.DS_Store
+
+# IDE & Jupyter
+.idea/
+.vscode/
+.ipynb_checkpoints/
+
+# System specific
+backups/
+_qvex_safety_backups/
 logs/
 *.log
-*.tmp
-*.zip
-
-# Бэкапы и тяжелые локальные архивы
-backups/
-archive/
-
-# Сырые исторические маркет-датасеты (CSV, Parquet)
-data/raw/
-data/history_deep/
-data/universe/
+artifacts/
+*.csv
 data/*.csv
-data/*.parquet
-
-# Стейт выполнения и чувствительные данные
-.env
-data/orderflow_state.json
-data/bot_state.json
-
-# Отчеты и визуализации бэктестов
-results/*.csv
-results/*.png
-
-# Системные файлы ОС
-.DS_Store
-Thumbs.db

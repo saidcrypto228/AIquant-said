@@ -1,0 +1,18 @@
+{
+  "timestamp": 1790360687.3574615,
+  "brand": "QVEX",
+  "account": {
+    "total_balance": 1000.0,
+    "equity": 1000.0,
+    "free_margin": 1000.0,
+    "max_slots": 2
+  },
+  "positions": {},
+  "market_regime": {
+    "status": "BEAR/CHOP",
+    "slope": 0.05,
+    "btc_price": 84200.0,
+    "storm_filter_active": false
+  },
+  "active_triggers": []
+}
