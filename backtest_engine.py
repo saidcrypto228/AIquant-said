@@ -288,14 +288,14 @@ def simulate_v10_7(start_idx, end_idx, title="", mode="v11"):
                 sl_dist = abs(fill_px - trig["sl_px"])
 
                 if sl_dist / fill_px >= 0.008:
-                    rem_risk_budget = max(0.0, max_stop_risk_allowed - current_stop_risk)
-                    if rem_risk_budget > 0:
-                        max_ntl_risk = rem_risk_budget / (sl_dist / fill_px)
-                        target_notional = min(current_equity * 0.75, max_ntl_risk)
-                        avail_cap = max(0.0, portfolio_cap_usd - total_notional)
-                        final_ntl = min(target_notional, avail_cap)
+                    # Строгий риск на 1 сделку: 1.0% от текущего капитала (без плечевого перегруза)
+                    single_trade_risk_usd = current_equity * 0.01
+                    target_notional = single_trade_risk_usd / max(sl_dist / fill_px, 1e-4)
+                    target_notional = min(target_notional, current_equity * 0.40)
+                    avail_cap = max(0.0, portfolio_cap_usd - total_notional)
+                    final_ntl = min(target_notional, avail_cap)
 
-                        if final_ntl >= 10.0 and cash >= (final_ntl * 0.2):
+                    if final_ntl >= 10.0 and cash >= (final_ntl * 0.2):
                             sz = final_ntl / fill_px
                             fee = final_ntl * TAKER_FEE
                             margin = final_ntl * 0.2

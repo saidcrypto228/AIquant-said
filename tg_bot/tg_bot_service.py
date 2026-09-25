@@ -1,3 +1,14 @@
+import sys
+from pathlib import Path
+
+# Гарантия корректных импортов из корня и внутри пакета tg_bot
+_current_dir = Path(__file__).resolve().parent
+_root_dir = _current_dir.parent
+if str(_current_dir) not in sys.path:
+    sys.path.insert(0, str(_current_dir))
+if str(_root_dir) not in sys.path:
+    sys.path.insert(0, str(_root_dir))
+
 import asyncio
 import json
 import logging

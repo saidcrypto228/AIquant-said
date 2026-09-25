@@ -70,7 +70,7 @@ def main():
     SERVICES = [
         {"name": "TMA-SERVER", "script": "tma_server.py",     "prefix": "[1/3 TMA ]"},
         {"name": "CORE-BOT",   "script": "hl_swing_bot.py",   "prefix": "[2/3 CORE]"},
-        {"name": "TG-SERVICE", "script": "tg_bot_service.py", "prefix": "[3/3 TG  ]"},
+        {"name": "TG-SERVICE", "script": str(Path("tg_bot") / "tg_bot_service.py"), "prefix": "[3/3 TG  ]"},
     ]
 
     procs = []

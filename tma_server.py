@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+_tg_path = str(Path(__file__).resolve().parent / 'tg_bot')
+if _tg_path not in sys.path:
+    sys.path.insert(0, _tg_path)
+
 import hashlib
 import hmac
 import json
@@ -89,5 +95,5 @@ if static_dir.exists():
     app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
-    import sys
+    import uvicorn
     uvicorn.run(app, host=settings.SERVER_HOST, port=settings.SERVER_PORT, log_level="warning")
