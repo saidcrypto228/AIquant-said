@@ -341,7 +341,14 @@ def simulate_v10_7(start_idx: int, end_idx: int, title: str):
                         ]
                         prob = predict_meta_prob(raw_feats)
                         if prob >= 0.48:
-                            sl_price = row["low"] - (atr * 0.85) if valid_pb else row["close"] - (atr * 1.50)
+                            base_sl = row["low"] - (atr * 0.85) if valid_pb else row["close"] - (atr * 1.50)
+                            sh_f, sl_f = QuantFactorEngine.compute_fractal_swings(c_hist["high"], c_hist["low"], window=2)
+
+                            # Фрактальный стоп: если подтвержденный свинговый минимум ближе 1.5 ATR (но >= 0.8 ATR)
+                            if sl_f and sl_f < row["close"] and (row["close"] - sl_f) >= (atr * 0.80):
+                                sl_price = max(base_sl, sl_f * 0.999)
+                            else:
+                                sl_price = base_sl
 
                             pending_triggers[coin] = {
                                 "direction": "LONG", "entry_type": "PULLBACK" if valid_pb else "BREAKOUT",

@@ -59,19 +59,22 @@ class PrecisionEngine:
         if not math.isfinite(price) or price <= 0:
             raise ValueError(f"Invalid price value: {price}")
 
-        # Integer prices разрешены без ограничения значащих цифр
+        # 1. Целочисленные цены разрешены L1 независимо от значащих цифр
         if abs(price - round(price)) < 1e-9:
             return float(round(price))
 
-        sig_5_str = f"{price:.5g}"
-        sig_5_val = float(sig_5_str)
+        # 2. Институциональная формула Hyperliquid:
+        # До 5 значащих цифр И не более (6 - szDecimals) знаков после запятой
+        magnitude = math.floor(math.log10(price))
+        sig_decimals = max(0, 5 - magnitude - 1)
+        hard_max_decimals = max(0, max_decimals - sz_decimals)
+        allowed_decimals = max(0, min(sig_decimals, hard_max_decimals))
 
-        allowed_decimals = max(0, max_decimals - sz_decimals)
         step = Decimal("10") ** -allowed_decimals
-        dec_price = Decimal(str(sig_5_val))
-
+        dec_price = Decimal(f"{price:.10f}")
         round_mode = ROUND_UP if is_buy_stop else ROUND_DOWN
         rounded_dec = dec_price.quantize(step, rounding=round_mode)
+
         res = float(f"{rounded_dec:f}")
         if res <= 0:
             raise ValueError(f"Price rounded to zero: {price}")
@@ -335,21 +338,22 @@ class HyperliquidSwingBot:
     def get_orderflow_metrics(self, coin: str) -> dict:
         state_file = config.DATA_DIR / "orderflow_state.json"
         if not state_file.exists():
-            return {"cvd_ratio": 0.0, "cvd_usd": 0.0, "last_px": 0.0, "is_fresh": False}
+            return {"cvd_ratio": 0.0, "cvd_usd": 0.0, "obi_10": 0.0, "last_px": 0.0, "is_fresh": False}
         try:
             with open(state_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if time.time() - data.get("timestamp", 0) > config.ORDERFLOW_STALE_TIMEOUT_SEC:
-                return {"cvd_ratio": 0.0, "cvd_usd": 0.0, "last_px": 0.0, "is_fresh": False}
+                return {"cvd_ratio": 0.0, "cvd_usd": 0.0, "obi_10": 0.0, "last_px": 0.0, "is_fresh": False}
             coin_data = data.get("coins", {}).get(coin, {})
             return {
                 "cvd_ratio": coin_data.get("cvd_ratio", 0.0),
                 "cvd_usd": coin_data.get("cvd_usd", 0.0),
+                "obi_10": coin_data.get("obi_10", 0.0),
                 "last_px": coin_data.get("last_px", 0.0),
                 "is_fresh": True
             }
         except Exception:
-            return {"cvd_ratio": 0.0, "cvd_usd": 0.0, "last_px": 0.0, "is_fresh": False}
+            return {"cvd_ratio": 0.0, "cvd_usd": 0.0, "obi_10": 0.0, "last_px": 0.0, "is_fresh": False}
 
     def get_portfolio_equity(self) -> float:
         if self.exchange and not self.address.startswith("0x000"):
@@ -425,7 +429,7 @@ class HyperliquidSwingBot:
         clean_sz = PrecisionEngine.round_sz(sz, sz_decimals)
 
         if not self.exchange:
-            logger.info(f"[DRY-RUN] Market Stop-Loss: {coin} {clean_sz} @ trigger \({clean_sl} (limit:\){clean_limit})")
+            logger.info(f"[DRY-RUN] Market Stop-Loss: {coin} {clean_sz} @ trigger ${clean_sl} (limit: ${clean_limit})")
             return True
 
         existing_oid = self.state.get("positions", {}).get(coin, {}).get("stop_oid")
@@ -630,6 +634,17 @@ class HyperliquidSwingBot:
                     del self.pending_triggers[coin]
                     continue
 
+                # Институциональный фильтр OBI_10 (защита от стены лимитных заявок против входа)
+                obi_val = of_m.get("obi_10", 0.0)
+                if is_long and obi_val < -0.25:
+                    logger.warning(f"[OBI FILTER] {coin}: Стена продавцов в стакане (OBI={obi_val:.2f} < -0.25). Вход отклонен.")
+                    del self.pending_triggers[coin]
+                    continue
+                elif not is_long and obi_val > +0.25:
+                    logger.warning(f"[OBI FILTER] {coin}: Стена покупателей в стакане (OBI={obi_val:.2f} > +0.25). Вход отклонен.")
+                    del self.pending_triggers[coin]
+                    continue
+
                 sizing = self.calculate_sizing(coin, trig["trigger_px"], trig["sl_px"], ml_prob=trig["ml_prob"], committed_notional=committed_notional)
                 if not sizing:
                     del self.pending_triggers[coin]
@@ -735,7 +750,15 @@ class HyperliquidSwingBot:
                         if ml_prob < 0.48:
                             continue
 
-                        sl_price = row["low"] - (atr * 0.85) if valid_pullback else row["close"] - (atr * 1.50)
+                        # Расчет фрактального уровня ликвидности (Swing Low)
+                        sh_f, sl_f = QuantFactorEngine.compute_fractal_swings(df_c["high"], df_c["low"], window=2)
+                        base_sl = row["low"] - (atr * 0.85) if valid_pullback else row["close"] - (atr * 1.50)
+
+                        # Если фрактальный минимум подтвержден и находится ближе стандартного стопа (но >= 0.8 ATR)
+                        if sl_f and sl_f < row["close"] and (row["close"] - sl_f) >= (atr * 0.80):
+                            sl_price = max(base_sl, sl_f * 0.999)
+                        else:
+                            sl_price = base_sl
 
                         self.pending_triggers[coin] = {
                             "direction": "LONG", "trigger_px": row["high"] * 1.0005,
