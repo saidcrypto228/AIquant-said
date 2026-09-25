@@ -534,7 +534,7 @@ class HyperliquidSwingBot:
         btc_slope_rel = last_btc["ema50_slope"] / max(last_btc["close"] * 0.01, 1e-4)
 
         if (btc_bull and btc_slope_rel > 0.15) or (btc_bear and btc_slope_rel < -0.25):
-            self.active_slots_limit = 3
+            self.active_slots_limit = 2
         else:
             self.active_slots_limit = 2
 
