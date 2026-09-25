@@ -38,3 +38,14 @@ logs/
 artifacts/
 *.csv
 data/*.csv
+
+
+# Anaconda / Jupyter checkpoints & local DB
+anaconda_projects/
+.ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+*$py.class
+results/
+logs/
+data/*.json
