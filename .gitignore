@@ -52,3 +52,6 @@ data/*.json
 
 # Local heavy archives
 archive/
+
+# Jupyter notebooks
+*.ipynb
