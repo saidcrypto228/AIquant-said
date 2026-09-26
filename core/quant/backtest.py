@@ -22,8 +22,8 @@ from typing import Dict, List, Any
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
-import bot_config as config
-from quant_factors import QuantFactorEngine
+from core import config
+from core.quant.factors import QuantFactorEngine
 
 print("=" * 85)
 print("  БЭКТЕСТЕР v10.7: HARDENED PORTFOLIO RISK & SLIPPAGE STRESS (0.25%)")

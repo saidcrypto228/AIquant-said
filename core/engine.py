@@ -1,4 +1,4 @@
-from qvex_utils import atomic_write_json
+from core.utils.helpers import atomic_write_json
 #!/usr/bin/env python3
 """
 Hyperliquid 4H Swing Bot (Production v10.7 - Institutional Hardened Engine).
@@ -28,11 +28,11 @@ from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
 from hyperliquid.utils.types import Cloid
 
-import core_config as config
-from control_ipc import ControlStateManager
-from state_schema import CoreState, PositionState, ModelStatus, DataQuality, CANONICAL_TELEMETRY_PATH
-from state_ipc import PosixAtomicStateManager
-from quant_factors import QuantFactorEngine
+from core import config
+from core.ipc.control import ControlStateManager
+from core.ipc.schema import CoreState, PositionState, ModelStatus, DataQuality, CANONICAL_TELEMETRY_PATH
+from core.ipc.state import PosixAtomicStateManager
+from core.quant.factors import QuantFactorEngine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -217,8 +217,8 @@ class HyperliquidSwingBot:
 
     def save_state(self):
         try:
-            from qvex_utils import atomic_write_json
-            atomic_write_json(self.state_file, self.state)
+            from core.utils.helpers import atomic_write_json
+            atomic_write_json(config.STATE_FILE, self.state)
         except Exception as err:
             logger.error(f"[-] Ошибка сохранения стейта: {err}")
 

@@ -23,7 +23,7 @@ import websockets
 import numpy as np
 
 import bot_config as config
-from quant_factors import QuantFactorEngine
+from core.quant.factors import QuantFactorEngine
 
 logging.basicConfig(
     level=logging.INFO,

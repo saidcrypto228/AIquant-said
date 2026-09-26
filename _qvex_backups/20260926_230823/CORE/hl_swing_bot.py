@@ -1,938 +1,3 @@
-================================================================================
-QVEX v10.7 — CORE SOURCE CODE & IPC SNAPSHOT
-================================================================================
-
-
-################################################################################
-FILE: state_schema.py (46 lines)
-################################################################################
-
-"""
-QVEX v10.7 — Декларативные схемы состояния торгового ядра и телеметрии.
-Исключительно Pydantic-модели без прямого дискового ввода/вывода.
-"""
-from typing import Dict, Optional
-from pydantic import BaseModel, Field
-
-class MarketRegime(BaseModel):
-    status: str = Field(..., description="Рыночный режим: STRONG_BULL, BULL, CHOP, BEAR, STRONG_BEAR")
-    btc_price: float = Field(..., description="Текущая индикативная цена BTC")
-    slope: float = Field(default=0.0, description="Наклон скользящей EMA")
-
-class AccountInfo(BaseModel):
-    equity: float = Field(..., description="Текущий баланс депозита")
-    free_margin: float = Field(..., description="Свободная маржа")
-    total_balance: float = Field(..., description="Общий баланс счета")
-    max_slots: int = Field(default=2, description="Максимум одновременно торгуемых пар")
-
-class Position(BaseModel):
-    symbol: str = Field(..., description="Тикер актива (BTC, ETH, SOL)")
-    side: str = Field(..., description="Направление: LONG / SHORT")
-    size: float = Field(..., description="Размер позиции в базовой валюте")
-    entry_price: float = Field(..., description="Средневзвешенная цена входа")
-    current_price: float = Field(..., description="Текущая рыночная цена")
-    unrealized_pnl: float = Field(default=0.0, description="Нереализованный PnL в USD")
-    chandelier_stop: float = Field(..., description="Актуальный уровень биржевого трейлинг-стопа")
-
-class StateSnapshot(BaseModel):
-    total_equity: float = Field(..., description="Совокупная ликвидационная стоимость")
-    free_margin: float = Field(..., description="Маржинальный резерв")
-    btc_price: float = Field(..., description="Цена бенчмарка BTC")
-    account_address: str = Field(..., description="Адрес аккаунта Hyperliquid")
-    market_regime: MarketRegime = Field(..., description="Метрики рыночного режима")
-    account: AccountInfo = Field(..., description="Параметры счета")
-    positions: Dict[str, Position] = Field(default_factory=dict, description="Словарь открытых позиций")
-
-# --- ФУНКЦИИ ОБРАТНОЙ СОВМЕСТИМОСТИ (BRIDGES TO STATE_IPC) ---
-def write_state_atomic(state: StateSnapshot, filepath: str = "data/bot_state.json") -> None:
-    from state_ipc import PosixAtomicStateManager
-    mgr = PosixAtomicStateManager(filepath, StateSnapshot)
-    mgr.write_atomic_state(state)
-
-def read_state_safe(filepath: str = "data/bot_state.json") -> StateSnapshot:
-    from state_ipc import PosixAtomicStateManager
-    mgr = PosixAtomicStateManager(filepath, StateSnapshot)
-    return mgr.read_atomic_state()
-
-
-################################################################################
-FILE: state_ipc.py (42 lines)
-################################################################################
-
-"""
-QVEX v10.7 — Потокобезопасный межпроцессный менеджер состояний (POSIX Atomic IPC).
-Использует атомарную замену файлов os.replace для гарантированной целостности данных.
-"""
-import os
-import json
-import logging
-from pathlib import Path
-from typing import Type, TypeVar
-from pydantic import BaseModel
-
-logger = logging.getLogger("QVEX.StateIPC")
-T = TypeVar("T", bound=BaseModel)
-
-class PosixAtomicStateManager:
-    def __init__(self, filepath: str, schema_cls: Type[T]):
-        self.path = Path(filepath).resolve()
-        self.schema_cls = schema_cls
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    def write_atomic_state(self, state: T) -> None:
-        """Атомарная запись через локальный staging-файл с последующей заменой."""
-        tmp_file = self.path.with_suffix(".tmp")
-        try:
-            payload = state.model_dump_json(indent=2)
-            tmp_file.write_text(payload, encoding="utf-8")
-            os.replace(tmp_file, self.path)
-        except Exception as err:
-            logger.error(f"[IPC] Ошибка атомарной записи в {self.path.name}: {err}")
-            if tmp_file.exists():
-                try:
-                    tmp_file.unlink()
-                except OSError:
-                    pass
-            raise
-
-    def read_atomic_state(self) -> T:
-        """Потокобезопасное чтение и валидация через Pydantic-схему."""
-        if not self.path.exists():
-            raise FileNotFoundError(f"Файл состояния не найден: {self.path}")
-        raw_data = self.path.read_text(encoding="utf-8")
-        return self.schema_cls.model_validate_json(raw_data)
-
-
-################################################################################
-FILE: control_ipc.py (71 lines)
-################################################################################
-
-"""
-QVEX v10.7 — Менеджер удаленного управления торговлей (ChatOps Control Bus).
-Обеспечивает атомарную передачу команд между внешним Control Plane и торговым ядром.
-"""
-import json
-import logging
-from pathlib import Path
-from datetime import datetime, timezone
-from pydantic import BaseModel, Field
-
-logger = logging.getLogger("QVEX.ControlIPC")
-
-class TradingControlState(BaseModel):
-    trading_enabled: bool = Field(default=True, description="Разрешение на открытие новых позиций")
-    panic_requested: bool = Field(default=False, description="Флаг экстренной ликвидации портфеля")
-    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    last_command_by: str = Field(default="system")
-    message: str = Field(default="Штатный режим")
-
-class ControlStateManager:
-    def __init__(self, filepath: str = "data/trading_control.json"):
-        self.path = Path(filepath).resolve()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self.set_state(TradingControlState())
-
-    def get_state(self) -> TradingControlState:
-        try:
-            if not self.path.exists():
-                return TradingControlState()
-            raw = self.path.read_text(encoding="utf-8")
-            return TradingControlState.model_validate_json(raw)
-        except Exception as e:
-            logger.error(f"Ошибка чтения флагов управления: {e}")
-            return TradingControlState()
-
-    def set_state(self, state: TradingControlState) -> None:
-        state.updated_at = datetime.now(timezone.utc).isoformat()
-        temp_path = self.path.with_suffix(".tmp")
-        temp_path.write_text(state.model_dump_json(indent=2), encoding="utf-8")
-        temp_path.replace(self.path)
-
-    def pause_trading(self, admin_tag: str = "Operator") -> TradingControlState:
-        state = self.get_state()
-        state.trading_enabled = False
-        state.last_command_by = admin_tag
-        state.message = "Торговля приостановлена пользователем (новые сделки заблокированы)"
-        self.set_state(state)
-        return state
-
-    def resume_trading(self, admin_tag: str = "Operator") -> TradingControlState:
-        state = self.get_state()
-        state.trading_enabled = True
-        state.last_command_by = admin_tag
-        state.message = "Торговля активна (генерация сигналов включена)"
-        self.set_state(state)
-        return state
-
-    def trigger_panic(self, admin_tag: str = "Operator") -> TradingControlState:
-        state = self.get_state()
-        state.panic_requested = True
-        state.trading_enabled = False
-        state.last_command_by = admin_tag
-        state.message = "АКТИВИРОВАН РЕЖИМ PANIC: экстренный сброс всех позиций!"
-        self.set_state(state)
-        return state
-
-    def clear_panic(self) -> None:
-        state = self.get_state()
-        state.panic_requested = False
-        self.set_state(state)
-
-
-################################################################################
-FILE: data/core_state.json (17 lines)
-################################################################################
-
-{
-  "schema_version": 2,
-  "timestamp": "2026-09-26T10:13:45.356219Z",
-  "total_equity": 10099.0,
-  "free_margin": 8099.0,
-  "btc_price": 85990.0,
-  "positions": {},
-  "market_regime": {
-    "label": "UNKNOWN",
-    "slope": 0.01,
-    "volatility": 0.0,
-    "status": "BULL"
-  },
-  "account_address": "0x0B6BD56E8a4baadfE8331f89b628c6bd73B892b8",
-  "read_only_mode": true,
-  "dry_run": true
-}
-
-################################################################################
-FILE: data/trading_control.json (7 lines)
-################################################################################
-
-{
-  "trading_enabled": true,
-  "panic_requested": false,
-  "updated_at": "2026-09-26T10:07:35.358880+00:00",
-  "last_command_by": "TG:7001461641",
-  "message": "Торговля активна (генерация сигналов включена)"
-}
-
-################################################################################
-FILE: core_config.py (65 lines)
-################################################################################
-
-#!/usr/bin/env python3
-"""
-Конфигурация квантового торгового комплекса v10.0 (Alpha Expansion & L1 Hardened).
-"""
-
-import os
-from pathlib import Path
-
-# Сеть и учетные данные
-IS_TESTNET = True
-ACCOUNT_ADDRESS = "0x0000000000000000000000000000000000000000"
-SECRET_KEY = ""
-
-# Базовые директории
-BASE_DIR = Path(__file__).parent.resolve()
-DATA_DIR = BASE_DIR / "data"
-LOG_DIR = BASE_DIR / "logs"
-DATA_DIR.mkdir(exist_ok=True)
-LOG_DIR.mkdir(exist_ok=True)
-STATE_FILE = DATA_DIR / "bot_state.json"
-
-# Вселенная активов (11 ликвидных альткоинов)
-TARGET_COINS = [
-    "SOL", "AVAX", "SUI", "APT", "DOGE", 
-    "NEAR", "ARB", "OP", "TIA", "INJ", "RENDER"
-]
-
-# Временные интервалы
-CANDLE_TIMEFRAME = "1h"
-CHECK_INTERVAL_SEC = 60
-RECONCILE_INTERVAL_SEC = 15
-DEADMAN_TIMEOUT_MIN = 15
-
-# Alpha Blueprint v10.0: Лимиты капитала и динамические слоты
-PORTFOLIO_HARD_LEVERAGE_CAP = 2.50
-MAX_PORTFOLIO_LEVERAGE = 2.50
-BASE_CONCURRENT_POSITIONS = 2
-EXPANDED_CONCURRENT_POSITIONS = 4
-MAX_OPEN_POSITIONS = 2  # Динамически модулируется до 4
-
-# Адаптивный риск-менеджмент
-BASE_RISK_PER_TRADE = 0.0100
-MIN_RISK_PER_TRADE = 0.0060
-MAX_RISK_PER_TRADE = 0.0165
-MAX_SINGLE_POSITION_LEVERAGE = 1.10
-MIN_NOTIONAL_USD = 10.0
-ENTRY_SLIPPAGE = 0.005
-
-# Макро-модуляция тренда BTC
-BTC_SLOPE_THRESHOLD = 0.40
-BTC_TREND_FILTER_MA_PERIOD = 200
-
-# Асимметричный выход: 40% TP1 + 60% Runner
-TAKE_PROFIT_1_ATR_MULTIPLE = 1.50
-TAKE_PROFIT_1_SIZE_RATIO = 0.40
-SOFT_BREAKEVEN_ATR_OFFSET = 0.20
-CHANDELIER_LOOKBACK_PERIODS = 18
-CHANDELIER_ATR_MULTIPLIER = 2.50
-
-# Микроструктура и лимиты L1
-MAX_PRICE_SIGNIFICANT_FIGURES = 5
-MAX_PERP_DECIMALS = 6
-STOP_BUFFER_LIMIT_RATIO = 0.15
-ORDERFLOW_STALE_TIMEOUT_SEC = 15.0
-
-
-
-################################################################################
-FILE: qvex.py (74 lines)
-################################################################################
-
-"""
-=============================================================================
-                    QVEX v10.7 — CORE RUNNER (AUTONOMOUS)
-=============================================================================
-Чистая точка запуска автономного торгового ядра QVEX на Hyperliquid L1.
-Запуск:
-    python qvex.py
-=============================================================================
-"""
-import os
-import sys
-import signal
-import subprocess
-import logging
-from pathlib import Path
-from dotenv import load_dotenv
-
-ROOT_DIR = Path(__file__).resolve().parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-load_dotenv()
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] [QVEX-CORE-RUNNER]: %(message)s"
-)
-logger = logging.getLogger("QVEX.Runner")
-
-def print_banner():
-    is_testnet = os.getenv("TESTNET", "True").lower() == "true"
-    net_str = "TESTNET (Песочница)" if is_testnet else "MAINNET (Реальный счет)"
-
-    print("=" * 72)
-    print("        🚀 QVEX v10.7: АВТОНОМНЫЙ ЗАПУСК ТОРГОВОГО ЯДРА (БЕЗ БОТА)     ")
-    print("=" * 72)
-    print(f"• Сеть:             {net_str}")
-    print(f"• Режим:            Изолированное квантовое ядро")
-    print(f"• Архитектура:      4H Swing + Native L1 Stops + Atomic POSIX IPC")
-    print("=" * 72)
-    print("Для безопасной остановки нажмите Ctrl + C\n")
-
-def main():
-    print_banner()
-
-    core_script = ROOT_DIR / "hl_swing_bot.py"
-    if not core_script.exists():
-        logger.critical(f"Файл торгового ядра не найден: {core_script}")
-        sys.exit(1)
-
-    logger.info("Запуск автономного торгового процесса (hl_swing_bot.py)...")
-    core_proc = subprocess.Popen([sys.executable, str(core_script)], cwd=str(ROOT_DIR))
-
-    def shutdown(signum, frame):
-        logger.info("Получен сигнал завершения. Остановка торгового ядра...")
-        if core_proc.poll() is None:
-            core_proc.terminate()
-            try:
-                core_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                core_proc.kill()
-        logger.info("✔ Торговое ядро успешно остановлено.")
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
-
-    try:
-        core_proc.wait()
-    except KeyboardInterrupt:
-        shutdown(None, None)
-
-if __name__ == "__main__":
-    main()
-
-
-################################################################################
-FILE: hl_gateway.py (150 lines)
-################################################################################
-
-"""
-QVEX v10.7 — Архитектурный шлюз исполнения ордеров Hyperliquid L1.
-Реализует требования аудита: нативные L1-триггеры, монотонный nonce,
-детерминированный cloid, коридор slippage <= 0.2%, подавление 502/504
-и институциональную изоляцию ключей Master / Agent Wallet.
-"""
-import asyncio
-import time
-import uuid
-import logging
-from typing import Optional, Dict, Any
-from eth_account.signers.local import LocalAccount
-from hyperliquid.exchange import Exchange
-from hyperliquid.info import Info
-from hyperliquid.utils.error import ServerError
-
-logger = logging.getLogger("QVEX.ExecutionGateway")
-
-class HyperliquidExecutionGateway:
-    def __init__(
-        self,
-        agent_account: LocalAccount,
-        base_url: str,
-        info_client: Info,
-        master_address: Optional[str] = None,
-        **kwargs
-    ):
-        self.account = agent_account
-        self.base_url = base_url
-        self.info = info_client
-        self.master_address = master_address or kwargs.get("account_address")
-
-        # Если задан адрес мастер-кошелька, агент подписывает сделки от его имени
-        if self.master_address and self.master_address.lower() != self.account.address.lower():
-            self.exchange = Exchange(self.account, self.base_url, account_address=self.master_address)
-            logger.info(f"[SECURITY] Агент {self.account.address} авторизован для счета {self.master_address}")
-        else:
-            self.exchange = Exchange(self.account, self.base_url)
-
-        self._nonce_lock = asyncio.Lock()
-        self._last_nonce = 0
-
-    async def get_monotonic_nonce(self) -> int:
-        """Генерирует строго монотонно возрастающий nonce в миллисекундах."""
-        async with self._nonce_lock:
-            current_ms = int(time.time() * 1000)
-            if current_ms <= self._last_nonce:
-                self._last_nonce += 1
-            else:
-                self._last_nonce = current_ms
-            return self._last_nonce
-
-    @staticmethod
-    def generate_cloid() -> str:
-        """Создает валидный 128-битный шестнадцатеричный идентификатор cloid."""
-        return f"0x{uuid.uuid4().hex}"
-
-    async def place_native_trigger_stop(
-        self,
-        coin: str,
-        is_buy: bool,
-        size: float,
-        trigger_px: float,
-        cloid: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Размещает нативный биржевой триггер-стоп непосредственно на валидаторах L1.
-        Ордер защищен reduce_only=True и исполняется даже при падении сервера бота.
-        """
-        cloid = cloid or self.generate_cloid()
-        order_type = {
-            "trigger": {
-                "triggerPx": str(round(trigger_px, 2)),
-                "isMarket": True,
-                "tpsl": "sl"
-            }
-        }
-
-        return await self._execute_with_retry(
-            self.exchange.order,
-            name=coin,
-            is_buy=is_buy,
-            sz=round(size, 4),
-            limit_px=round(trigger_px, 2),
-            order_type=order_type,
-            reduce_only=True,
-            cloid=cloid
-        )
-
-    async def execute_ioc_market_order(
-        self,
-        coin: str,
-        is_buy: bool,
-        size: float,
-        max_slippage: float = 0.002
-    ) -> Dict[str, Any]:
-        """
-        Агрессивный лимитный IOC-ордер со строгим коридором проскальзывания <= 0.2%.
-        Предотвращает потерю 5% спреда, зашитого по умолчанию в SDK.
-        """
-        all_mids = await asyncio.to_thread(self.info.all_mids)
-        if coin not in all_mids:
-            raise ValueError(f"Котировка для {coin} не найдена в стакане биржи")
-
-        mid_px = float(all_mids[coin])
-        limit_px = mid_px * (1.0 + max_slippage) if is_buy else mid_px * (1.0 - max_slippage)
-        cloid = self.generate_cloid()
-
-        order_type = {"limit": {"tif": "Ioc"}}
-
-        return await self._execute_with_retry(
-            self.exchange.order,
-            name=coin,
-            is_buy=is_buy,
-            sz=round(size, 4),
-            limit_px=round(limit_px, 2),
-            order_type=order_type,
-            reduce_only=False,
-            cloid=cloid
-        )
-
-    async def _execute_with_retry(self, func, *args, **kwargs) -> Dict[str, Any]:
-        """Вызов SDK с подавлением сетевых сбоев 502/504 и экспоненциальным бэкоффом."""
-        max_retries = 4
-        base_backoff = 0.5
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                response = await asyncio.to_thread(func, *args, **kwargs)
-
-                if isinstance(response, dict) and response.get("status") == "err":
-                    err_details = response.get("response", "Неизвестная ошибка L1")
-                    logger.error(f"L1 отклонил действие: {err_details}")
-                    raise RuntimeError(f"L1 Action Rejection: {err_details}")
-
-                return response
-
-            except ServerError as server_err:
-                logger.warning(
-                    f"Сетевой сбой ноды Hyperliquid (попытка {attempt}/{max_retries}): {server_err}"
-                )
-                if attempt == max_retries:
-                    raise
-                await asyncio.sleep(base_backoff * (2 ** (attempt - 1)))
-
-            except Exception as ex:
-                logger.error(f"Исключение при вызове SDK: {ex}")
-                if attempt == max_retries:
-                    raise
-                await asyncio.sleep(base_backoff * (2 ** (attempt - 1)))
-
-
-################################################################################
-FILE: hl_panic.py (78 lines)
-################################################################################
-
-"""
-QVEX v10.7 — Исполнительный модуль аварийного закрытия позиций (SlideToPanicEngine).
-Реализует требования аудита: пакетная отмена всех заявок на L1
-и итеративная ликвидация экспозиций через агрессивный IOC с коридором 1.0%.
-"""
-import asyncio
-import logging
-from typing import Dict, Any, List
-
-logger = logging.getLogger("QVEX.PanicEngine")
-
-class SlideToPanicEngine:
-    def __init__(self, gateway: Any, info_client: Any, user_address: str):
-        self.gateway = gateway
-        self.info = info_client
-        self.user_address = user_address
-
-    async def execute_emergency_flatten(self) -> Dict[str, Any]:
-        """
-        Процедура экстренного сброса:
-        1. Полная отмена всех ордеров в книге заявок.
-        2. Срез физических позиций через user_state / clearinghouse.
-        3. Параллельная отправка агрессивных IOC-ордеров с ликвидационным коридором 1.0%.
-        4. Итеративный контроль до полного обнуления портфеля.
-        """
-        logger.critical("АКТИВИРОВАН КОНТУР SLIDE-TO-PANIC: ПРИНУДИТЕЛЬНЫЙ СБРОС ВСЕХ ЭКСПОЗИЦИЙ")
-        audit_trail = {"cancelled_orders": False, "closed_fills": [], "errors": []}
-
-        # 1. Отмена всех активных лимитов и триггеров
-        try:
-            await asyncio.to_thread(self.gateway.exchange.cancel_all_orders)
-            audit_trail["cancelled_orders"] = True
-            logger.info("Все открытые ордера успешно аннулированы на бирже.")
-        except Exception as cancel_exc:
-            logger.error(f"Сбой при пакетной отмене ордеров: {cancel_exc}")
-            audit_trail["errors"].append(str(cancel_exc))
-
-        # 2. Итеративная редукция позиций до нуля
-        max_flatten_cycles = 3
-        for cycle in range(1, max_flatten_cycles + 1):
-            state = await asyncio.to_thread(self.info.user_state, self.user_address)
-            active_positions = [
-                pos["position"] for pos in state.get("assetPositions", [])
-                if abs(float(pos["position"]["szi"])) > 1e-6
-            ]
-
-            if not active_positions:
-                logger.info("Портфель полностью приведен в нейтральное состояние (0 exposure).")
-                break
-
-            tasks = []
-            for pos in active_positions:
-                coin = pos["coin"]
-                szi = float(pos["szi"])
-                close_is_buy = szi < 0  # Если short — покупаем для покрытия
-                size = abs(szi)
-
-                # Допуск 1.0% проскальзывания для форсированного выхода из позиции
-                tasks.append(
-                    self.gateway.execute_ioc_market_order(
-                        coin=coin,
-                        is_buy=close_is_buy,
-                        size=size,
-                        max_slippage=0.010
-                    )
-                )
-
-            cycle_results = await asyncio.gather(*tasks, return_exceptions=True)
-            for res in cycle_results:
-                if isinstance(res, Exception):
-                    logger.error(f"Ошибка сброса позиции в цикле {cycle}: {res}")
-                    audit_trail["errors"].append(str(res))
-                else:
-                    audit_trail["closed_fills"].append(res)
-
-            await asyncio.sleep(0.8)
-
-        return audit_trail
-
-
-################################################################################
-FILE: hl_readonly.py (101 lines)
-################################################################################
-
-"""
-QVEX v10.7 — Read-Only модуль интеграции с Hyperliquid.
-"""
-from __future__ import annotations
-import time
-import asyncio
-import logging
-from dataclasses import dataclass
-from typing import Any, Optional, Dict, List
-import httpx
-
-logger = logging.getLogger("qvex.hl_readonly")
-HL_INFO_URL = "https://api.hyperliquid.xyz/info"
-ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
-
-@dataclass
-class _CacheEntry:
-    value: Any
-    fetched_at: float
-
-class HyperliquidReadOnlyClient:
-    def __init__(self, account_address: Optional[str] = None, timeout: float = 10.0):
-        self.account_address = (account_address or ZERO_ADDRESS).lower()
-        self.dry_run = self.account_address == ZERO_ADDRESS
-        self._client = httpx.AsyncClient(timeout=timeout)
-        self._cache: Dict[str, _CacheEntry] = {}
-        self._lock = asyncio.Lock()
-
-    async def aclose(self):
-        await self._client.aclose()
-
-    def _cache_get(self, key: str, ttl: float):
-        entry = self._cache.get(key)
-        if entry and (time.monotonic() - entry.fetched_at) < ttl:
-            return entry.value
-        return None
-
-    def _cache_set(self, key: str, value: Any):
-        self._cache[key] = _CacheEntry(value=value, fetched_at=time.monotonic())
-
-    async def _post_info(self, payload: dict) -> Any:
-        resp = await self._client.post(HL_INFO_URL, json=payload)
-        resp.raise_for_status()
-        return resp.json()
-
-    async def get_clearinghouse_state(self) -> dict:
-        if self.dry_run:
-            return {
-                "marginSummary": {"accountValue": "0", "totalMarginUsed": "0"},
-                "assetPositions": [],
-                "withdrawable": "0"
-            }
-        cache_key = f"chs:{self.account_address}"
-        cached = self._cache_get(cache_key, 10.0)
-        if cached is not None:
-            return cached
-        async with self._lock:
-            try:
-                data = await self._post_info({"type": "clearinghouseState", "user": self.account_address})
-                self._cache_set(cache_key, data)
-                return data
-            except Exception as e:
-                logger.error("Clearinghouse fetch error: %s", e)
-                return {"marginSummary": {"accountValue": "0", "totalMarginUsed": "0"}, "assetPositions": [], "withdrawable": "0"}
-
-    async def get_candles(self, coin: str = "BTC", interval: str = "4h", lookback_hours: int = 72) -> List[dict]:
-        cache_key = f"candles:{coin}:{interval}:{lookback_hours}"
-        cached = self._cache_get(cache_key, 45.0)
-        if cached is not None:
-            return cached
-        async with self._lock:
-            now_ms = int(time.time() * 1000)
-            start_ms = now_ms - lookback_hours * 3600 * 1000
-            try:
-                data = await self._post_info({
-                    "type": "candleSnapshot",
-                    "req": {"coin": coin, "interval": interval, "startTime": start_ms, "endTime": now_ms}
-                })
-                normalized = [
-                    {"time": c["t"] // 1000, "open": float(c["o"]), "high": float(c["h"]), "low": float(c["l"]), "close": float(c["c"]), "volume": float(c["v"])}
-                    for c in data
-                ]
-                self._cache_set(cache_key, normalized)
-                return normalized
-            except Exception as e:
-                logger.error("Candles fetch error: %s", e)
-                return []
-
-def parse_positions_from_clearinghouse(chs: dict) -> Dict[str, dict]:
-    out = {}
-    for ap in chs.get("assetPositions", []):
-        pos = ap.get("position", {})
-        sym = pos.get("coin")
-        szi = float(pos.get("szi", 0))
-        if sym and szi != 0:
-            out[sym] = {
-                "symbol": sym, "side": "LONG" if szi > 0 else "SHORT",
-                "size": abs(szi), "entry_price": float(pos.get("entryPx", 0)),
-                "unrealized_pnl": float(pos.get("unrealizedPnl", 0))
-            }
-    return out
-
-
-################################################################################
-FILE: hl_reconciler.py (93 lines)
-################################################################################
-
-"""
-QVEX v10.7 — Модуль ончейн-реконсиляции и синхронизации ордеров (CRIT-01, CRIT-04).
-Сверяет локальный стейт с реестром Hyperliquid L1, исключает орфанные ордера
-и гарантирует наличие нативных L1-стопов на валидаторах.
-"""
-import asyncio
-import logging
-from typing import Dict, Any
-
-logger = logging.getLogger("QVEX.Reconciliation")
-
-class OnChainStateReconciler:
-    def __init__(self, user_address: str, info_client: Any, gateway: Any):
-        self.user_address = user_address
-        self.info = info_client
-        self.gateway = gateway
-
-    async def perform_full_reconciliation(self) -> None:
-        """Блокирующий аудит открытых позиций и нативных триггерных ордеров."""
-        logger.info("[RECONCILE] Запуск ончейн-реконсиляции с распределенным реестром Hyperliquid...")
-
-        # 1. Извлечение физических позиций и полной структуры открытых ордеров
-        clearinghouse = await asyncio.to_thread(self.info.user_state, self.user_address)
-        open_orders = await asyncio.to_thread(self.info.frontend_open_orders, self.user_address)
-
-        physical_positions = {}
-        for position_wrapper in clearinghouse.get("assetPositions", []):
-            pos = position_wrapper["position"]
-            size = float(pos["szi"])
-            if abs(size) > 1e-6:
-                physical_positions[pos["coin"]] = {
-                    "size": size,
-                    "entry_px": float(pos["entryPx"]),
-                    "liquidation_px": float(pos.get("liquidationPx") or 0.0),
-                    "is_long": size > 0
-                }
-
-        # 2. Индексация активных триггерных стоп-ордеров
-        trigger_stops = {}
-        for order in open_orders:
-            if order.get("isTrigger", False):
-                coin = order["coin"]
-                trigger_stops[coin] = order
-
-        # 3. Валидация защиты открытых позиций
-        for coin, pos_info in physical_positions.items():
-            pos_size = abs(pos_info["size"])
-
-            if coin not in trigger_stops:
-                logger.critical(
-                    f"[ALERT] ОТКАЗ ЗАЩИТЫ: Позиция {coin} (объем {pos_info['size']}) не защищена стопом на L1!"
-                )
-                await self._restore_emergency_stop(coin, pos_info)
-            else:
-                trigger = trigger_stops[coin]
-                trigger_size = float(trigger["sz"])
-                if abs(trigger_size - pos_size) > 1e-6:
-                    logger.warning(
-                        f"[RECONCILE] Рассинхронизация объема {coin}: Позиция={pos_size}, Стоп={trigger_size}. Перевыставление..."
-                    )
-                    await asyncio.to_thread(self.gateway.exchange.cancel, coin, trigger["oid"])
-                    await self.gateway.place_native_trigger_stop(
-                        coin=coin,
-                        is_buy=not pos_info["is_long"],
-                        size=pos_size,
-                        trigger_px=float(trigger["triggerPx"])
-                    )
-
-        # 4. Ликвидация орфанных стопов (ордер активен, но физическая позиция закрыта)
-        for coin, trigger in trigger_stops.items():
-            if coin not in physical_positions:
-                logger.warning(
-                    f"[RECONCILE] Обнаружен орфанный стоп-ордер по {coin} (oid={trigger['oid']}). Аннулирование..."
-                )
-                await asyncio.to_thread(self.gateway.exchange.cancel, coin, trigger["oid"])
-
-        logger.info("[RECONCILE] Ончейн-реконсиляция успешно завершена.")
-
-    async def _restore_emergency_stop(self, coin: str, pos_info: Dict[str, Any]) -> None:
-        """Восстанавливает защитный биржевой стоп с аварийным буфером волатильности 1.5%."""
-        mids = await asyncio.to_thread(self.info.all_mids)
-        current_px = float(mids[coin])
-        emergency_buffer = 0.015
-
-        stop_px = current_px * (1.0 - emergency_buffer) if pos_info["is_long"] else current_px * (1.0 + emergency_buffer)
-
-        await self.gateway.place_native_trigger_stop(
-            coin=coin,
-            is_buy=not pos_info["is_long"],
-            size=abs(pos_info["size"]),
-            trigger_px=round(stop_px, 4)
-        )
-        logger.info(f"[RECONCILE] Аварийный биржевой L1-стоп выставлен для {coin} по цене {stop_px}")
-
-
-################################################################################
-FILE: approve_agent.py (55 lines)
-################################################################################
-
-"""
-QVEX v10.7 — Утилита разовой авторизации Agent Wallet на Hyperliquid L1.
-Считывает мастер-ключ и адрес агента из .env и выполняет транзакцию EIP-712.
-"""
-import os
-import sys
-from dotenv import load_dotenv
-from eth_account import Account
-from hyperliquid.exchange import Exchange
-from hyperliquid.utils import constants
-
-load_dotenv()
-
-def main():
-    master_key = os.getenv("SECRET_KEY")
-    agent_address = os.getenv("AGENT_ADDRESS")
-    is_testnet = os.getenv("TESTNET", "True").lower() == "true"
-    base_url = constants.TESTNET_API_URL if is_testnet else constants.MAINNET_API_URL
-
-    if not master_key or not agent_address:
-        print("[!] Ошибка: В файле .env отсутствуют SECRET_KEY или AGENT_ADDRESS.")
-        return
-
-    try:
-        master_account = Account.from_key(master_key)
-    except Exception as parse_err:
-        print(f"[!] Ошибка разбора SECRET_KEY из .env: {parse_err}")
-        return
-
-    print("=" * 70)
-    print("🔑 АВТОРИЗАЦИЯ АГЕНТСКОГО КОШЕЛЬКА НА HYPERLIQUID L1")
-    print(f"• Сеть:          {'TESTNET' if is_testnet else 'MAINNET'}")
-    print(f"• Мастер-счет:   {master_account.address}")
-    print(f"• Агент:         {agent_address}")
-    print("=" * 70)
-
-    exchange = Exchange(master_account, base_url)
-    try:
-        result = exchange.approve_agent(agent_address)
-        # Строгая валидация статуса ответа L1
-        status_dict = result[0] if isinstance(result, tuple) else result
-        if isinstance(status_dict, dict) and status_dict.get("status") == "err":
-            err_msg = status_dict.get("response", "Неизвестная ошибка")
-            print(f"❌ БИРЖА ОТКЛОНИЛА ДЕЙСТВИЕ: {err_msg}")
-            if "Must deposit" in str(err_msg):
-                print("💡 ДЕЙСТВИЕ: Зайдите на app.hyperliquid-testnet.xyz и запросите тестовые USDC через Faucet!")
-            return
-
-        print(f"✔ Ответ биржи L1: {result}")
-        print("✔ Агент успешно наделен торговыми правами без права вывода средств!")
-    except Exception as e:
-        print(f"❌ Ошибка авторизации агента: {e}")
-
-if __name__ == "__main__":
-    main()
-
-
-################################################################################
-FILE: check_clock_drift.py (51 lines)
-################################################################################
-
-"""
-QVEX v10.7 — Проверка рассинхронизации системного времени (HyperBFT Drift Check).
-Проверяет расхождение локальных часов относительно биржевых серверов Hyperliquid.
-Лимит консенсуса: строго < 1000 мс.
-"""
-import time
-import requests
-
-def verify_hyperliquid_drift():
-    print("=" * 60)
-    print("⏱️ ПРОВЕРКА ДРЕЙФА СИСТЕМНОГО ВРЕМЕНИ ДЛЯ HYPERLIQUID L1")
-    print("=" * 60)
-
-    t_start = time.time()
-    try:
-        response = requests.post(
-            "https://api.hyperliquid.xyz/info",
-            json={"type": "meta"},
-            timeout=5
-        )
-        t_recv = time.time()
-
-        # Оценка сетевой задержки (Round-Trip Time)
-        rtt_ms = (t_recv - t_start) * 1000
-
-        # Серверный заголовок даты
-        date_header = response.headers.get("Date")
-        if not date_header:
-            print("⚠️ Заголовок Date отсутствует в ответе ноды.")
-            return
-
-        from email.utils import parsedate_to_datetime
-        server_dt = parsedate_to_datetime(date_header)
-        server_ts = server_dt.timestamp()
-        local_ts = t_recv
-
-        drift_ms = abs(local_ts - server_ts) * 1000
-        print(f"• Сетевая задержка (RTT): {rtt_ms:.1f} мс")
-        print(f"• Расхождение времени:    {drift_ms:.1f} мс")
-
-        if drift_ms < 1000:
-            print("✔ [СТАТУС: В НОРМЕ] Дрейф часов соответствует консенсусу HyperBFT (< 1000 мс).")
-        else:
-            print("❌ [СТАТУС: РИСК] Расхождение превышает 1000 мс! Необходима синхронизация chrony.")
-
-    except Exception as e:
-        print(f"Ошибка проверки времени: {e}")
-    print("=" * 60)
-
-if __name__ == "__main__":
-    verify_hyperliquid_drift()
-
-
-################################################################################
-FILE: hl_swing_bot.py (847 lines)
-################################################################################
-
 from qvex_utils import atomic_write_json
 #!/usr/bin/env python3
 """
@@ -963,7 +28,10 @@ from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
 from hyperliquid.utils.types import Cloid
 
-import bot_config as config
+import core_config as config
+from control_ipc import ControlStateManager
+from state_schema import CoreState, PositionState, ModelStatus, DataQuality, CANONICAL_TELEMETRY_PATH
+from state_ipc import PosixAtomicStateManager
 from quant_factors import QuantFactorEngine
 
 logging.basicConfig(
@@ -1107,6 +175,8 @@ class HyperliquidSwingBot:
         else:
             logger.warning("[!] Приватный ключ не задан. Режим DRY-RUN.")
 
+        self.control_mgr = ControlStateManager()
+        self.telemetry_ipc = PosixAtomicStateManager(CANONICAL_TELEMETRY_PATH, CoreState)
         self.universe_meta = self._load_meta()
         self.state = self.load_state()
         self.pending_triggers: Dict[str, Any] = {}
@@ -1148,7 +218,7 @@ class HyperliquidSwingBot:
     def save_state(self):
         try:
             from qvex_utils import atomic_write_json
-            atomic_write_json(self.state_file, self.state)
+            atomic_write_json(config.STATE_FILE, self.state)
         except Exception as err:
             logger.error(f"[-] Ошибка сохранения стейта: {err}")
 
@@ -1458,10 +528,97 @@ class HyperliquidSwingBot:
             logger.error(f"[-] Сбой закрытия {coin}: {e}")
             self.reconcile_with_exchange()
 
+    def publish_telemetry(self, btc_price: Optional[float] = None, market_regime: Optional[str] = None):
+        """GAP-04: Каноническая публикация телеметрии по разделам 8 и 9 аудита."""
+        try:
+            ctrl_state = self.control_mgr.get_state()
+            equity = None
+            free_margin = None
+            unrealized_pnl = None
+            data_fresh = False
+            dq_reason = "DRY-RUN mode: private key not configured"
+
+            if self.exchange and not self.address.startswith("0x000"):
+                try:
+                    acc_state = self.info.clearinghouse_state(self.address)
+                    m_summary = acc_state.get("marginSummary", {})
+                    if "accountValue" in m_summary:
+                        equity = float(m_summary["accountValue"])
+                        total_used = float(m_summary.get("totalMarginUsed", 0.0))
+                        free_margin = max(0.0, equity - total_used)
+                        cum_pnl = sum(
+                            float(p.get("position", {}).get("unrealizedPnl", 0.0))
+                            for p in acc_state.get("assetPositions", [])
+                        )
+                        unrealized_pnl = cum_pnl
+                        data_fresh = True
+                        dq_reason = None
+                except Exception as exc:
+                    dq_reason = f"Exchange API error: {exc}"
+
+            pos_list = [
+                PositionState(
+                    coin=c,
+                    side=p.get("direction", "LONG"),
+                    size=float(p.get("size", 0.0)),
+                    entry_px=float(p.get("entry_px", 0.0)),
+                    sl_px=float(p["sl_px"]) if p.get("sl_px") is not None else None,
+                    highest_px=float(p["highest_px"]) if p.get("highest_px") is not None else None,
+                    lowest_px=float(p["lowest_px"]) if p.get("lowest_px") is not None else None,
+                    trailing_active=bool(p.get("trailing_active", False)),
+                    breakeven_active=bool(p.get("breakeven_active", False)),
+                    ml_prob=float(p["ml_prob"]) if p.get("ml_prob") is not None else None
+                )
+                for c, p in self.state.get("positions", {}).items()
+            ]
+
+            model_file = config.DATA_DIR / "meta_model.json"
+            feat_cnt = len(self.meta_weights.get("weights", [])) if isinstance(self.meta_weights, dict) else 0
+            m_status = ModelStatus(
+                loaded=bool(self.meta_weights),
+                model_path=str(model_file) if model_file.exists() else None,
+                features_count=feat_cnt
+            )
+
+            status_str = "PAUSED" if not ctrl_state.trading_enabled else "ACTIVE"
+            snapshot = CoreState(
+                schema_version=1,
+                timestamp=time.time(),
+                system_status=status_str,
+                trading_enabled=ctrl_state.trading_enabled,
+                network="TESTNET" if self.is_testnet else "MAINNET",
+                account_address=self.address,
+                equity=equity,
+                free_margin=free_margin,
+                unrealized_pnl=unrealized_pnl,
+                btc_price=btc_price,
+                market_regime=market_regime,
+                active_slots=len(self.state.get("positions", {})),
+                max_slots=self.active_slots_limit,
+                positions=pos_list,
+                model_status=m_status,
+                data_quality=DataQuality(fresh=data_fresh, reason=dq_reason)
+            )
+            self.telemetry_ipc.write_atomic_state(snapshot)
+        except Exception as exc:
+            logger.error(f"[TELEMETRY ERROR] Ошибка публикации снимка: {exc}")
+
     def run_cycle(self):
         self.reconcile_with_exchange()
         self.refresh_deadmans_switch()
         now = time.time()
+
+        # GAP-03: Чтение состояния из канонической шины управления
+        ctrl_state = self.control_mgr.get_state()
+        if ctrl_state.panic_requested:
+            logger.critical("[PANIC] Получен сигнал экстренной ликвидации от Control Plane!")
+            self.pending_triggers.clear()
+            for coin in list(self.state.get("positions", {}).keys()):
+                pos = self.state["positions"][coin]
+                self.exit_position(coin, pos.get("size", 0.0), reason="PANIC_EMERGENCY_CLOSE")
+            self.reconcile_with_exchange()
+            self.control_mgr.clear_panic()
+            return
 
         btc_df = self.md_worker.compute_multi_tf_indicators("BTC")
         if btc_df.empty:
@@ -1550,6 +707,12 @@ class HyperliquidSwingBot:
                     reason = "CHANDELIER_EXIT" if pos.get("trailing_active") else "INITIAL_STOP"
                     self.exit_position(coin, pos["size"], reason)
 
+        # GAP-03: Шлюз блокировки новых входов при паузе торговли оператором
+        if not ctrl_state.trading_enabled:
+            logger.info("[PAUSE] Торговля приостановлена оператором. Сопровождение активно, новые входы заблокированы.")
+            self.publish_telemetry(btc_price=float(last_btc["close"]), market_regime=regime_str)
+            return
+
         # Исполнение триггеров
         committed_notional = 0.0
         for coin, trig in list(self.pending_triggers.items()):
@@ -1586,10 +749,10 @@ class HyperliquidSwingBot:
                     continue
 
                 # 2. Economic Cost Gate (защита от ловушки трения комиссий и проскальзывания)
-                if entry_px <= 0.0:
+                if trig["trigger_px"] <= 0.0:
                     del self.pending_triggers[coin]
                     continue
-                stop_dist_pct = abs(entry_px - trg["sl_px"]) / entry_px
+                stop_dist_pct = abs(trig["trigger_px"] - trig["sl_px"]) / trig["trigger_px"]
                 MIN_ECONOMIC_STOP_PCT = 0.0120  # 1.20% минимальная экономическая дистанция
                 if stop_dist_pct < MIN_ECONOMIC_STOP_PCT:
                     logger.warning(f"[ECONOMIC COST GATE] {coin}: Стоп {stop_dist_pct*100:.2f}% < 1.20%. Трение съест матожидание. Вход отменен.")
@@ -1763,6 +926,9 @@ class HyperliquidSwingBot:
                         }
                         active_assets.add(coin)
 
+        # GAP-04: Финальная публикация канонического снимка в конце итерации
+        self.publish_telemetry(btc_price=float(last_btc["close"]), market_regime=regime_str)
+
     def start(self):
         logger.info("=" * 75)
         logger.info("  QVEX: QUANTITATIVE VECTOR EXECUTION v10.7 (INSTITUTIONAL HARDENED)")
@@ -1780,4 +946,3 @@ class HyperliquidSwingBot:
 if __name__ == "__main__":
     bot = HyperliquidSwingBot()
     bot.start()
-

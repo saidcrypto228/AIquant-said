@@ -6,8 +6,8 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
-from quant_factors import QuantFactorEngine
-from qvex_utils import atomic_write_json
+from core.quant.factors import QuantFactorEngine
+from core.utils.helpers import atomic_write_json
 
 logger = logging.getLogger("QVEX-Retrain")
 

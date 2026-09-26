@@ -49,3 +49,6 @@ __pycache__/
 results/
 logs/
 data/*.json
+
+# Local heavy archives
+archive/
