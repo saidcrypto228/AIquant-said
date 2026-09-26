@@ -28,7 +28,10 @@ from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
 from hyperliquid.utils.types import Cloid
 
-import bot_config as config
+import core_config as config
+from control_ipc import ControlStateManager
+from state_schema import CoreState, PositionState, ModelStatus, DataQuality, CANONICAL_TELEMETRY_PATH
+from state_ipc import PosixAtomicStateManager
 from quant_factors import QuantFactorEngine
 
 logging.basicConfig(
@@ -172,6 +175,8 @@ class HyperliquidSwingBot:
         else:
             logger.warning("[!] Приватный ключ не задан. Режим DRY-RUN.")
 
+        self.control_mgr = ControlStateManager()
+        self.telemetry_ipc = PosixAtomicStateManager(CANONICAL_TELEMETRY_PATH, CoreState)
         self.universe_meta = self._load_meta()
         self.state = self.load_state()
         self.pending_triggers: Dict[str, Any] = {}
@@ -523,10 +528,97 @@ class HyperliquidSwingBot:
             logger.error(f"[-] Сбой закрытия {coin}: {e}")
             self.reconcile_with_exchange()
 
+    def publish_telemetry(self, btc_price: Optional[float] = None, market_regime: Optional[str] = None):
+        """GAP-04: Каноническая публикация телеметрии по разделам 8 и 9 аудита."""
+        try:
+            ctrl_state = self.control_mgr.get_state()
+            equity = None
+            free_margin = None
+            unrealized_pnl = None
+            data_fresh = False
+            dq_reason = "DRY-RUN mode: private key not configured"
+
+            if self.exchange and not self.address.startswith("0x000"):
+                try:
+                    acc_state = self.info.clearinghouse_state(self.address)
+                    m_summary = acc_state.get("marginSummary", {})
+                    if "accountValue" in m_summary:
+                        equity = float(m_summary["accountValue"])
+                        total_used = float(m_summary.get("totalMarginUsed", 0.0))
+                        free_margin = max(0.0, equity - total_used)
+                        cum_pnl = sum(
+                            float(p.get("position", {}).get("unrealizedPnl", 0.0))
+                            for p in acc_state.get("assetPositions", [])
+                        )
+                        unrealized_pnl = cum_pnl
+                        data_fresh = True
+                        dq_reason = None
+                except Exception as exc:
+                    dq_reason = f"Exchange API error: {exc}"
+
+            pos_list = [
+                PositionState(
+                    coin=c,
+                    side=p.get("direction", "LONG"),
+                    size=float(p.get("size", 0.0)),
+                    entry_px=float(p.get("entry_px", 0.0)),
+                    sl_px=float(p["sl_px"]) if p.get("sl_px") is not None else None,
+                    highest_px=float(p["highest_px"]) if p.get("highest_px") is not None else None,
+                    lowest_px=float(p["lowest_px"]) if p.get("lowest_px") is not None else None,
+                    trailing_active=bool(p.get("trailing_active", False)),
+                    breakeven_active=bool(p.get("breakeven_active", False)),
+                    ml_prob=float(p["ml_prob"]) if p.get("ml_prob") is not None else None
+                )
+                for c, p in self.state.get("positions", {}).items()
+            ]
+
+            model_file = config.DATA_DIR / "meta_model.json"
+            feat_cnt = len(self.meta_weights.get("weights", [])) if isinstance(self.meta_weights, dict) else 0
+            m_status = ModelStatus(
+                loaded=bool(self.meta_weights),
+                model_path=str(model_file) if model_file.exists() else None,
+                features_count=feat_cnt
+            )
+
+            status_str = "PAUSED" if not ctrl_state.trading_enabled else "ACTIVE"
+            snapshot = CoreState(
+                schema_version=1,
+                timestamp=time.time(),
+                system_status=status_str,
+                trading_enabled=ctrl_state.trading_enabled,
+                network="TESTNET" if self.is_testnet else "MAINNET",
+                account_address=self.address,
+                equity=equity,
+                free_margin=free_margin,
+                unrealized_pnl=unrealized_pnl,
+                btc_price=btc_price,
+                market_regime=market_regime,
+                active_slots=len(self.state.get("positions", {})),
+                max_slots=self.active_slots_limit,
+                positions=pos_list,
+                model_status=m_status,
+                data_quality=DataQuality(fresh=data_fresh, reason=dq_reason)
+            )
+            self.telemetry_ipc.write_atomic_state(snapshot)
+        except Exception as exc:
+            logger.error(f"[TELEMETRY ERROR] Ошибка публикации снимка: {exc}")
+
     def run_cycle(self):
         self.reconcile_with_exchange()
         self.refresh_deadmans_switch()
         now = time.time()
+
+        # GAP-03: Чтение состояния из канонической шины управления
+        ctrl_state = self.control_mgr.get_state()
+        if ctrl_state.panic_requested:
+            logger.critical("[PANIC] Получен сигнал экстренной ликвидации от Control Plane!")
+            self.pending_triggers.clear()
+            for coin in list(self.state.get("positions", {}).keys()):
+                pos = self.state["positions"][coin]
+                self.exit_position(coin, pos.get("size", 0.0), reason="PANIC_EMERGENCY_CLOSE")
+            self.reconcile_with_exchange()
+            self.control_mgr.clear_panic()
+            return
 
         btc_df = self.md_worker.compute_multi_tf_indicators("BTC")
         if btc_df.empty:
@@ -615,6 +707,12 @@ class HyperliquidSwingBot:
                     reason = "CHANDELIER_EXIT" if pos.get("trailing_active") else "INITIAL_STOP"
                     self.exit_position(coin, pos["size"], reason)
 
+        # GAP-03: Шлюз блокировки новых входов при паузе торговли оператором
+        if not ctrl_state.trading_enabled:
+            logger.info("[PAUSE] Торговля приостановлена оператором. Сопровождение активно, новые входы заблокированы.")
+            self.publish_telemetry(btc_price=float(last_btc["close"]), market_regime=regime_str)
+            return
+
         # Исполнение триггеров
         committed_notional = 0.0
         for coin, trig in list(self.pending_triggers.items()):
@@ -651,10 +749,10 @@ class HyperliquidSwingBot:
                     continue
 
                 # 2. Economic Cost Gate (защита от ловушки трения комиссий и проскальзывания)
-                if entry_px <= 0.0:
+                if trig["trigger_px"] <= 0.0:
                     del self.pending_triggers[coin]
                     continue
-                stop_dist_pct = abs(entry_px - trg["sl_px"]) / entry_px
+                stop_dist_pct = abs(trig["trigger_px"] - trig["sl_px"]) / trig["trigger_px"]
                 MIN_ECONOMIC_STOP_PCT = 0.0120  # 1.20% минимальная экономическая дистанция
                 if stop_dist_pct < MIN_ECONOMIC_STOP_PCT:
                     logger.warning(f"[ECONOMIC COST GATE] {coin}: Стоп {stop_dist_pct*100:.2f}% < 1.20%. Трение съест матожидание. Вход отменен.")
@@ -827,6 +925,9 @@ class HyperliquidSwingBot:
                             "atr": atr, "ml_prob": prob
                         }
                         active_assets.add(coin)
+
+        # GAP-04: Финальная публикация канонического снимка в конце итерации
+        self.publish_telemetry(btc_price=float(last_btc["close"]), market_regime=regime_str)
 
     def start(self):
         logger.info("=" * 75)
