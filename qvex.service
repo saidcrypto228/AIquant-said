@@ -1,0 +1,21 @@
+[Unit]
+Description=QVEX v10.7 Quantitative Swing Execution Engine
+After=network.target network-online.target chrony.service
+Wants=network-online.target chrony.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/qvex
+ExecStart=/opt/qvex/venv/bin/python /opt/qvex/run_engine.py
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

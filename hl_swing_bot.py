@@ -30,7 +30,6 @@ from hyperliquid.utils.types import Cloid
 
 import bot_config as config
 from quant_factors import QuantFactorEngine
-from tg_visualizer import TelegramVisualizer, esc
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,11 +40,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("QVEX-v10.7")
-
-class AsyncTelegramNotifier:
-    @staticmethod
-    def send_async(text: str):
-        threading.Thread(target=TelegramVisualizer.send_message, args=(text,), daemon=True).start()
 
 class PrecisionEngine:
     @staticmethod
@@ -521,7 +515,7 @@ class HyperliquidSwingBot:
                 return
 
             logger.info(f"[✓] Позиция {coin} закрыта ({reason}).")
-            AsyncTelegramNotifier.send_async(f"🔵 *Выход из позиции:* `{esc(coin)}` - {esc(reason)}")
+            logger.info(f"[EXIT EVENT] Закрытие позиции: {coin} | Причина: {reason}")
             if coin in self.state["positions"]:
                 del self.state["positions"][coin]
             self.save_state()
