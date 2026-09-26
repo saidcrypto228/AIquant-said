@@ -1,6 +1,6 @@
 """
 QVEX v10.7 — Менеджер удаленного управления торговлей (ChatOps Control Bus).
-Обеспечивает атомарную передачу команд между Telegram-ботом и торговым ядром.
+Обеспечивает атомарную передачу команд между внешним Control Plane и торговым ядром.
 """
 import json
 import logging
@@ -40,7 +40,7 @@ class ControlStateManager:
         temp_path.write_text(state.model_dump_json(indent=2), encoding="utf-8")
         temp_path.replace(self.path)
 
-    def pause_trading(self, admin_tag: str = "Telegram Admin") -> TradingControlState:
+    def pause_trading(self, admin_tag: str = "Operator") -> TradingControlState:
         state = self.get_state()
         state.trading_enabled = False
         state.last_command_by = admin_tag
@@ -48,7 +48,7 @@ class ControlStateManager:
         self.set_state(state)
         return state
 
-    def resume_trading(self, admin_tag: str = "Telegram Admin") -> TradingControlState:
+    def resume_trading(self, admin_tag: str = "Operator") -> TradingControlState:
         state = self.get_state()
         state.trading_enabled = True
         state.last_command_by = admin_tag
@@ -56,7 +56,7 @@ class ControlStateManager:
         self.set_state(state)
         return state
 
-    def trigger_panic(self, admin_tag: str = "Telegram Admin") -> TradingControlState:
+    def trigger_panic(self, admin_tag: str = "Operator") -> TradingControlState:
         state = self.get_state()
         state.panic_requested = True
         state.trading_enabled = False
